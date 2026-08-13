@@ -4,6 +4,9 @@ AGENTS.md
 # Runtime logs
 WindowsHealthRepair_*.log
 
+# Machine-local configuration (template is committed as WindowsHealthRepair.example.json)
+WindowsHealthRepair.json
+
 # Windows junk
 Thumbs.db
 Desktop.ini

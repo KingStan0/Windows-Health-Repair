@@ -1,0 +1,16 @@
+{
+  "LogRetentionCount": 10,
+  "CleanupOldLogs": true,
+  "StallWarnMinutes": 12,
+  "SfcStallWarnMinutes": 15,
+  "RunDismScan": true,
+  "RunDismRestore": true,
+  "RunSfc": true,
+  "RunComponentCleanup": true,
+  "RunWindowsUpdateCache": true,
+  "RunTempCleanup": true,
+  "CleanCurrentUserTemp": true,
+  "CleanAllUsersTemp": true,
+  "CleanSystemTemp": true,
+  "TcpCheckTimeoutSeconds": 5
+}

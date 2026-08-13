@@ -19,7 +19,9 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 - **Accurate results** - real exit codes captured via the .NET Process API (works on PowerShell 5.1, where `Start-Process` cannot provide exit codes)
 - **SFC verdict even when silent** - falls back to `CBS.log` analysis when `sfc` writes no summary output
 - **Hang detection** - warns (never kills) if DISM/SFC sit with zero CPU activity for an extended period
-- **Full logging** - timestamped `WindowsHealthRepair_<date>.log` saved next to the script
+- **Full logging** - timestamped `WindowsHealthRepair_<date>.log` saved next to the script, with per-phase timings, a summary table, and disk-space delta; old logs auto-pruned (keep the last 10 by default)
+- **Phase progress** - live progress bar and window title showing overall completion
+- **Configurable** - every phase and cleanup target can be toggled via `WindowsHealthRepair.json` (no code edits needed)
 - **Safe** - temp-only cleanup, Windows Update services stopped/restarted properly, reboot prompt only when repairs actually require it. Your files are never touched: the recycle bin is only emptied if you pass `-EmptyRecycleBin`
 - **Diagnostic guidance** - on DISM failures, points to Safe Mode / Windows ISO source next steps and logs the relevant log tails
 
@@ -51,6 +53,19 @@ Optional parameters:
 
 The script re-launches itself elevated via UAC if needed.
 
+## Configuration
+
+Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to the script and edit it (all keys are optional - unset keys use built-in defaults). The real file is gitignored so your local settings never dirty the repo.
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `RunDismScan` / `RunDismRestore` / `RunSfc` | `true` | toggle repair phases |
+| `RunComponentCleanup` / `RunWindowsUpdateCache` / `RunTempCleanup` | `true` | toggle cleanup phases |
+| `CleanCurrentUserTemp` / `CleanAllUsersTemp` / `CleanSystemTemp` | `true` | temp locations cleaned (all users' `AppData\Local\Temp` included) |
+| `StallWarnMinutes` / `SfcStallWarnMinutes` | `12` / `15` | watchdog warning threshold per tool |
+| `LogRetentionCount` / `CleanupOldLogs` | `10` / `true` | how many logs to keep |
+| `TcpCheckTimeoutSeconds` | `5` | internet pre-check timeout |
+
 ## What to expect
 
 | Phase | Tool | Duration (healthy system) |
@@ -62,7 +77,7 @@ The script re-launches itself elevated via UAC if needed.
 
 DISM RestoreHealth may appear stuck at a percentage (commonly 20% or 62.3%) - that is normal while it downloads. Let it finish; do not close the window or kill the process.
 
-At the end, the script shows a summary (exit codes + SFC verdict) and asks to restart only if repairs were applied.
+At the end, the script shows a summary table (per-phase result + elapsed time, total run time, disk-space delta) and asks to restart only if repairs were applied.
 
 ## Logs
 
