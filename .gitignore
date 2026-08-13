@@ -1,0 +1,13 @@
+# Agent instructions (local dev docs, not part of the shipped tool)
+AGENTS.md
+
+# Runtime logs
+WindowsHealthRepair_*.log
+
+# Windows junk
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# PowerShell
+*.ps1.bak
