@@ -1,7 +1,9 @@
 #Requires -Version 5.1
 
 [CmdletBinding()]
-param()
+param(
+    [switch]$EmptyRecycleBin
+)
 
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -278,13 +280,18 @@ if ($totalFreed -gt 0) {
     Write-Log ('Total temporary files removed: ~{0:N1} MB' -f $totalFreed) -Color Green
 }
 
-Write-Log 'Emptying the Recycle Bin...' -Color Green
-try {
-    Clear-RecycleBin -Force -ErrorAction Stop
-    Write-Log 'Recycle Bin emptied.'
+if ($EmptyRecycleBin) {
+    Write-Log 'Emptying the Recycle Bin...' -Color Green
+    try {
+        Clear-RecycleBin -Force -ErrorAction Stop
+        Write-Log 'Recycle Bin emptied.'
+    }
+    catch {
+        Write-Log ('Recycle Bin could not be emptied: ' + $_.Exception.Message) -Color Yellow
+    }
 }
-catch {
-    Write-Log ('Recycle Bin could not be emptied: ' + $_.Exception.Message) -Color Yellow
+else {
+    Write-Log 'Recycle Bin left untouched (run with -EmptyRecycleBin to clear it).'
 }
 
 Write-Log ''

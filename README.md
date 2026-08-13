@@ -8,7 +8,7 @@ System file corruption on Windows is usually fixed by three tools: DISM, SFC, an
 
 1. **DISM ScanHealth + RestoreHealth** - repairs the Windows component store (the source SFC copies files from)
 2. **sfc /scannow** - repairs protected system files using the now-healthy store
-3. **Disk cleanup** - superseded component cleanup, Windows Update cache, temp files, recycle bin
+3. **Disk cleanup** - superseded component cleanup, Windows Update cache, temp files, and optionally the recycle bin
 
 No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Windows repair utilities, run correctly.
 
@@ -20,7 +20,7 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 - **SFC verdict even when silent** - falls back to `CBS.log` analysis when `sfc` writes no summary output
 - **Hang detection** - warns (never kills) if DISM/SFC sit with zero CPU activity for an extended period
 - **Full logging** - timestamped `WindowsHealthRepair_<date>.log` saved next to the script
-- **Safe** - temp-only cleanup, Windows Update services stopped/restarted properly, reboot prompt only when repairs actually require it
+- **Safe** - temp-only cleanup, Windows Update services stopped/restarted properly, reboot prompt only when repairs actually require it. Your files are never touched: the recycle bin is only emptied if you pass `-EmptyRecycleBin`
 - **Diagnostic guidance** - on DISM failures, points to Safe Mode / Windows ISO source next steps and logs the relevant log tails
 
 ## Requirements
@@ -43,6 +43,12 @@ Repair Windows Health.bat
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "Repair-WindowsHealth.ps1"
 ```
 
+Optional parameters:
+
+| Parameter | Effect |
+|-----------|--------|
+| `-EmptyRecycleBin` | Also empty the Recycle Bin during Phase 3 (off by default) |
+
 The script re-launches itself elevated via UAC if needed.
 
 ## What to expect
@@ -52,7 +58,7 @@ The script re-launches itself elevated via UAC if needed.
 | Pre-flight | DISM CheckHealth | seconds |
 | Phase 1 | DISM ScanHealth / RestoreHealth | 5-15 minutes |
 | Phase 2 | sfc /scannow | 1-15 minutes |
-| Phase 3 | StartComponentCleanup, WU cache, temp, recycle bin | ~1 minute |
+| Phase 3 | StartComponentCleanup, WU cache, temp files, recycle bin (optional) | ~1 minute |
 
 DISM RestoreHealth may appear stuck at a percentage (commonly 20% or 62.3%) - that is normal while it downloads. Let it finish; do not close the window or kill the process.
 
@@ -66,4 +72,8 @@ At the end, the script shows a summary (exit codes + SFC verdict) and asks to re
 
 ## Disclaimer
 
-This tool runs built-in Windows repair utilities. While designed to be safe and non-destructive (no user data is touched), use at your own risk. A system backup is always a good idea before major repair operations.
+This tool runs built-in Windows repair utilities. It does not modify or delete any user data - cleanup is limited to system temp files, the Windows Update cache, and superseded component store versions; the Recycle Bin is only touched with `-EmptyRecycleBin`. That said, use at your own risk. A system backup is always a good idea before major repair operations.
+
+## License
+
+MIT - see [LICENSE](LICENSE).
