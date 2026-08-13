@@ -2,7 +2,12 @@
 
 [CmdletBinding()]
 param(
-    [switch]$EmptyRecycleBin
+    [switch]$EmptyRecycleBin,
+    [switch]$ReportOnly,
+    [switch]$Schedule,
+    [switch]$Unschedule,
+    [switch]$ScheduledRun,
+    [string]$Source = ''
 )
 
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -43,6 +48,7 @@ $config = @{
     CleanAllUsersTemp      = $true
     CleanSystemTemp        = $true
     TcpCheckTimeoutSeconds = 5
+    ShowCompletionPopup    = $true
 }
 $ConfigPath = Join-Path $ScriptDir 'WindowsHealthRepair.json'
 $configSource = 'built-in defaults'
@@ -59,17 +65,49 @@ if (Test-Path -LiteralPath $ConfigPath) {
     }
 }
 
+$ScheduledTaskName = 'Windows Health Repair'
+
+if ($Unschedule) {
+    try {
+        Unregister-ScheduledTask -TaskName $ScheduledTaskName -Confirm:$false -ErrorAction Stop
+        [Console]::WriteLine('Scheduled task "' + $ScheduledTaskName + '" removed.')
+    }
+    catch {
+        [Console]::WriteLine('No scheduled task found or could not be removed: ' + $_.Exception.Message)
+        exit 2
+    }
+    exit 0
+}
+
+if ($Schedule) {
+    try {
+        $taskFile = ('"{0}"' -f $PSCommandPath)
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy RemoteSigned -File ' + $taskFile + ' -ScheduledRun')
+        $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '03:00'
+        $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd
+        Register-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Settings $settings -Description 'Weekly Windows health repair (DISM, SFC, cleanup). Logs are saved in the script folder.' -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+        [Console]::WriteLine('Scheduled task "' + $ScheduledTaskName + '" registered: every Sunday at 03:00.')
+        [Console]::WriteLine('The task runs with highest privileges. To remove it later, run with -Unschedule.')
+    }
+    catch {
+        [Console]::WriteLine('Failed to register scheduled task: ' + $_.Exception.Message)
+        exit 2
+    }
+    exit 0
+}
+
 $script:results = New-Object System.Collections.ArrayList
 $script:stepPos = 0
 $steps = New-Object System.Collections.ArrayList
 [void]$steps.Add('Pre-flight')
-if ($config.RunDismScan) { [void]$steps.Add('DISM ScanHealth') }
-if ($config.RunDismRestore) { [void]$steps.Add('DISM RestoreHealth') }
+if ($config.RunDismScan -and -not $ReportOnly) { [void]$steps.Add('DISM ScanHealth') }
+if ($config.RunDismScan -and $ReportOnly) { [void]$steps.Add('DISM ScanHealth (report)') }
+if ($config.RunDismRestore -and -not $ReportOnly) { [void]$steps.Add('DISM RestoreHealth') }
 if ($config.RunSfc) { [void]$steps.Add('SFC') }
-if ($config.RunComponentCleanup) { [void]$steps.Add('Component cleanup') }
-if ($config.RunWindowsUpdateCache) { [void]$steps.Add('Windows Update cache') }
-if ($config.RunTempCleanup) { [void]$steps.Add('Temp files') }
-if ($EmptyRecycleBin) { [void]$steps.Add('Recycle bin') }
+if ($config.RunComponentCleanup -and -not $ReportOnly) { [void]$steps.Add('Component cleanup') }
+if ($config.RunWindowsUpdateCache -and -not $ReportOnly) { [void]$steps.Add('Windows Update cache') }
+if ($config.RunTempCleanup -and -not $ReportOnly) { [void]$steps.Add('Temp files') }
+if ($EmptyRecycleBin -and -not $ReportOnly) { [void]$steps.Add('Recycle bin') }
 $script:totalSteps = $steps.Count
 
 function Write-Log {
@@ -106,7 +144,13 @@ function Add-PhaseResult {
 
 function Format-Duration {
     param([double]$Seconds)
-    '{0}m {1:D2}s' -f [int]($Seconds / 60), ([int]$Seconds % 60)
+    $totalSec = [int][Math]::Floor($Seconds)
+    '{0}m {1:D2}s' -f [Math]::Floor($totalSec / 60), ($totalSec % 60)
+}
+
+trap {
+    Write-Log ('FATAL ERROR: ' + $_.Exception.Message) -Color Red
+    exit 2
 }
 
 function Invoke-NativeTool {
@@ -190,10 +234,36 @@ function Get-SfcCbsResult {
     return $result
 }
 
+function Get-DismLocalSource {
+    param([string]$ManualSource)
+    if ($ManualSource) {
+        if (Test-Path -LiteralPath $ManualSource) {
+            $item = Get-Item -LiteralPath $ManualSource
+            if ($item.PSIsContainer) {
+                $wim = Join-Path $ManualSource 'sources\install.wim'
+                if (Test-Path -LiteralPath $wim) { return $wim }
+                $esd = Join-Path $ManualSource 'sources\install.esd'
+                if (Test-Path -LiteralPath $esd) { return $esd }
+                return ''
+            }
+            return $ManualSource
+        }
+        return ''
+    }
+    foreach ($drive in (Get-PSDrive -PSProvider FileSystem | Where-Object { $null -ne $_.Root })) {
+        $wim = Join-Path $drive.Root 'sources\install.wim'
+        if (Test-Path -LiteralPath $wim) { return $wim }
+        $esd = Join-Path $drive.Root 'sources\install.esd'
+        if (Test-Path -LiteralPath $esd) { return $esd }
+    }
+    return ''
+}
+
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
 $driveName = $env:SystemDrive.TrimEnd(':')
 $freeBefore = (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue).Free
 $restartRecommended = $false
+$hadError = $false
 $tempArtifacts = @()
 $sfcResultText = 'See log'
 $totalRunStart = Get-Date
@@ -233,6 +303,18 @@ if (-not $connected) {
     Write-Log 'WARNING: No internet connection detected. DISM RestoreHealth needs Windows Update to download repair files and may fail.' -Color Yellow
 }
 
+$osVersion = [System.Environment]::OSVersion.Version
+if ($osVersion.Major -lt 10) {
+    Write-Log 'WARNING: This script targets Windows 10/11. Some commands may behave differently on this version.' -Color Yellow
+}
+$diskFreeGb = $freeBefore / 1GB
+if ($null -ne $diskFreeGb -and $diskFreeGb -lt 5) {
+    Write-Log ('WARNING: Only {0:N1} GB free on the system drive. DISM RestoreHealth may need about 5 GB to download repair files.' -f $diskFreeGb) -Color Yellow
+}
+if ($ReportOnly) {
+    Write-Log 'REPORT-ONLY mode: no repairs or cleanup will be performed.' -Color Yellow
+}
+
 Write-Log ''
 Write-Log '====================================================================' -Color Cyan
 Write-Log 'PHASE 1: Repairing the Windows component store (DISM)' -Color Cyan
@@ -245,6 +327,7 @@ if ($config.RunDismScan) {
     $dismScanExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/ScanHealth') -Phase 'DISM ScanHealth' -StallWarnMinutes $config.StallWarnMinutes
     $scanSw.Stop()
     Write-Log ('DISM ScanHealth finished with exit code ' + $dismScanExit)
+    if ($null -ne $dismScanExit -and $dismScanExit -ne 0) { $hadError = $true }
     Add-PhaseResult -Name 'DISM ScanHealth' -Detail ('exit ' + $dismScanExit) -Seconds $scanSw.Elapsed.TotalSeconds
 }
 else {
@@ -252,24 +335,42 @@ else {
     Write-Log 'DISM ScanHealth skipped (config: RunDismScan = false).' -Color Yellow
 }
 
-if ($config.RunDismRestore) {
+if ($config.RunDismRestore -and -not $ReportOnly) {
     Show-Progress 'DISM RestoreHealth'
     Write-Log 'Running DISM RestoreHealth (scans and repairs, downloads from Windows Update). This can take 10-30 minutes and may look stuck at a percentage - that is normal.' -Color Green
     $repairSw = [System.Diagnostics.Stopwatch]::StartNew()
     $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth') -Phase 'DISM RestoreHealth' -StallWarnMinutes $config.StallWarnMinutes
-    $repairSw.Stop()
     Write-Log ('DISM RestoreHealth finished with exit code ' + $dismRepairExit)
-    Add-PhaseResult -Name 'DISM RestoreHealth' -Detail ('exit ' + $dismRepairExit) -Seconds $repairSw.Elapsed.TotalSeconds
-
+    $sourceWim = ''
     if ($null -ne $dismRepairExit -and $dismRepairExit -ne 0) {
-        $restartRecommended = $true
-        Write-Log 'DISM reported an error. If the exit code or the log mentions 0x800f081f or 0x800f0906, Windows Update could not provide repair files. Next steps: boot into Safe Mode with Networking and run this script again, or re-run with a mounted Windows ISO as source.' -Color Yellow
+        $sourceWim = Get-DismLocalSource -ManualSource $Source
+        if ($sourceWim) {
+            Write-Log ('Windows Update source failed; retrying with local source: ' + $sourceWim) -Color Yellow
+            $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth', ('/Source:' + $sourceWim), '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
+            Write-Log ('DISM RestoreHealth (local source) finished with exit code ' + $dismRepairExit)
+        }
+    }
+    $repairSw.Stop()
+    if ($null -ne $dismRepairExit -and $dismRepairExit -ne 0) {
+        $hadError = $true
+        if (-not $sourceWim) {
+            Write-Log 'DISM reported an error and no local Windows ISO source was found (install.wim/install.esd). Mount a matching Windows ISO or run in Safe Mode with Networking, then try again.' -Color Yellow
+        }
+        else {
+            Write-Log 'DISM failed even with a local source. The local ISO may not match this Windows build.' -Color Yellow
+        }
         Add-LogTail -Path "$env:SystemRoot\Logs\DISM\dism.log" -Label 'DISM log'
     }
+    Add-PhaseResult -Name 'DISM RestoreHealth' -Detail ('exit ' + $dismRepairExit) -Seconds $repairSw.Elapsed.TotalSeconds
 }
 else {
     $dismRepairExit = $null
-    Write-Log 'DISM RestoreHealth skipped (config: RunDismRestore = false).' -Color Yellow
+    if ($ReportOnly) {
+        Write-Log 'DISM RestoreHealth skipped (report-only mode).' -Color Yellow
+    }
+    else {
+        Write-Log 'DISM RestoreHealth skipped (config: RunDismRestore = false).' -Color Yellow
+    }
 }
 
 Write-Log ''
@@ -279,14 +380,21 @@ Write-Log '===================================================================='
 
 if ($config.RunSfc) {
     Show-Progress 'SFC'
-    Write-Log 'Running sfc /scannow. This usually takes 10-20 minutes.' -Color Green
+    $sfcArgs = '/scannow'
+    if ($ReportOnly) {
+        $sfcArgs = '/verifyonly'
+        Write-Log 'Running sfc /verifyonly (report-only mode: verification, no repair). This can take 10-20 minutes.' -Color Green
+    }
+    else {
+        Write-Log 'Running sfc /scannow. This usually takes 10-20 minutes.' -Color Green
+    }
     $sfcSw = [System.Diagnostics.Stopwatch]::StartNew()
     $sfcTemp = Join-Path $env:TEMP ('sfc_out_{0}.txt' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
     $tempArtifacts += @($sfcTemp, ($sfcTemp + '.err'))
     $sfcOutput = ''
     $sfcExit = -1
     try {
-        $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList '/scannow' -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes -OutputFile $sfcTemp
+        $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList $sfcArgs -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes -OutputFile $sfcTemp
         $sfcOutput = Get-Content -LiteralPath $sfcTemp -Raw -ErrorAction SilentlyContinue
         $sfcErr = Get-Content -LiteralPath ($sfcTemp + '.err') -Raw -ErrorAction SilentlyContinue
         $sfcCombined = [string]$sfcOutput + ' ' + [string]$sfcErr
@@ -299,7 +407,22 @@ if ($config.RunSfc) {
     }
     $sfcSw.Stop()
 
-    if ($sfcCombined -match 'did not find any integrity violations') {
+    if ($ReportOnly) {
+        if ($sfcCombined -match 'did not find any integrity violations') {
+            $sfcResultText = 'Healthy'
+            Write-Log 'SFC result: no integrity violations found. System files are healthy.' -Color Green
+        }
+        elseif ($sfcCombined -match 'found corrupt files') {
+            $hadError = $true
+            $sfcResultText = 'Violations found'
+            Write-Log 'SFC result: corrupt files were found. Run the script in normal mode to repair them.' -Color Yellow
+        }
+        else {
+            $sfcResultText = 'Undetermined'
+            Write-Log 'SFC result: could not be determined from output. Full log available below.' -Color Yellow
+        }
+    }
+    elseif ($sfcCombined -match 'did not find any integrity violations') {
         $sfcResultText = 'Healthy'
         Write-Log 'SFC result: no integrity violations found. System files are healthy.' -Color Green
     }
@@ -340,20 +463,26 @@ Write-Log '===================================================================='
 Write-Log 'PHASE 3: Disk cleanup' -Color Cyan
 Write-Log '====================================================================' -Color Cyan
 
-if ($config.RunComponentCleanup) {
+if ($config.RunComponentCleanup -and -not $ReportOnly) {
     Show-Progress 'Component cleanup'
     Write-Log 'Cleaning up superseded components in the component store (StartComponentCleanup)...' -Color Green
     $cleanupSw = [System.Diagnostics.Stopwatch]::StartNew()
     $cleanupExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/StartComponentCleanup') -Phase 'StartComponentCleanup' -StallWarnMinutes $config.StallWarnMinutes
     $cleanupSw.Stop()
     Write-Log ('StartComponentCleanup finished with exit code ' + $cleanupExit)
+    if ($null -ne $cleanupExit -and $cleanupExit -ne 0) { $hadError = $true }
     Add-PhaseResult -Name 'Component cleanup' -Detail ('exit ' + $cleanupExit) -Seconds $cleanupSw.Elapsed.TotalSeconds
 }
 else {
-    Write-Log 'Component cleanup skipped (config: RunComponentCleanup = false).' -Color Yellow
+    if ($ReportOnly) {
+        Write-Log 'Component cleanup skipped (report-only mode).' -Color Yellow
+    }
+    else {
+        Write-Log 'Component cleanup skipped (config: RunComponentCleanup = false).' -Color Yellow
+    }
 }
 
-if ($config.RunWindowsUpdateCache) {
+if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
     Show-Progress 'Windows Update cache'
     Write-Log 'Freeing Windows Update download cache...' -Color Green
     $wuSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -388,10 +517,15 @@ if ($config.RunWindowsUpdateCache) {
     Add-PhaseResult -Name 'Windows Update cache' -Detail ('{0:N1} MB freed' -f [Math]::Max(0, $wuFreed)) -Seconds $wuSw.Elapsed.TotalSeconds
 }
 else {
-    Write-Log 'Windows Update cache cleanup skipped (config: RunWindowsUpdateCache = false).' -Color Yellow
+    if ($ReportOnly) {
+        Write-Log 'Windows Update cache cleanup skipped (report-only mode).' -Color Yellow
+    }
+    else {
+        Write-Log 'Windows Update cache cleanup skipped (config: RunWindowsUpdateCache = false).' -Color Yellow
+    }
 }
 
-if ($config.RunTempCleanup) {
+if ($config.RunTempCleanup -and -not $ReportOnly) {
     Show-Progress 'Temp files'
     Write-Log 'Cleaning temporary files...' -Color Green
     $tempSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -437,10 +571,15 @@ if ($config.RunTempCleanup) {
     Add-PhaseResult -Name 'Temp files' -Detail ('{0:N1} MB freed' -f [Math]::Max(0, $totalFreed)) -Seconds $tempSw.Elapsed.TotalSeconds
 }
 else {
-    Write-Log 'Temp cleanup skipped (config: RunTempCleanup = false).' -Color Yellow
+    if ($ReportOnly) {
+        Write-Log 'Temp cleanup skipped (report-only mode).' -Color Yellow
+    }
+    else {
+        Write-Log 'Temp cleanup skipped (config: RunTempCleanup = false).' -Color Yellow
+    }
 }
 
-if ($EmptyRecycleBin) {
+if ($EmptyRecycleBin -and -not $ReportOnly) {
     Show-Progress 'Recycle bin'
     Write-Log 'Emptying the Recycle Bin...' -Color Green
     $rbSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -457,7 +596,12 @@ if ($EmptyRecycleBin) {
     Add-PhaseResult -Name 'Recycle bin' -Detail $rbDetail -Seconds $rbSw.Elapsed.TotalSeconds
 }
 else {
-    Write-Log 'Recycle Bin left untouched (run with -EmptyRecycleBin to clear it).'
+    if ($ReportOnly) {
+        Write-Log 'Recycle Bin left untouched (report-only mode).'
+    }
+    else {
+        Write-Log 'Recycle Bin left untouched (run with -EmptyRecycleBin to clear it).'
+    }
 }
 
 Write-Log ''
@@ -492,7 +636,12 @@ if ($config.CleanupOldLogs -and $config.LogRetentionCount -ge 1) {
     }
 }
 
-if ($restartRecommended) {
+if ($hadError) {
+    Write-Log ''
+    Write-Log 'One or more phases reported errors. See the log for details.' -Color Yellow
+}
+
+if ($restartRecommended -and -not $ScheduledRun) {
     Write-Log ''
     Write-Log 'A restart is recommended to finish applying repairs.' -Color Yellow
     $answer = Read-Host 'Restart the computer now? (Y/N)'
@@ -500,7 +649,31 @@ if ($restartRecommended) {
         Restart-Computer -Force
     }
 }
+elseif ($restartRecommended -and $ScheduledRun) {
+    Write-Log 'A restart is recommended to finish applying repairs (skipped prompt in scheduled mode).'
+}
 
-if ($Host.Name -eq 'ConsoleHost') {
+if ($config.ShowCompletionPopup -and -not $ScheduledRun) {
+    $popupTitle = 'Windows Health Repair - Complete'
+    if ($hadError) { $popupTitle = 'Windows Health Repair - Finished with errors' }
+    $popupText = 'Windows Health Repair has completed.' + [Environment]::NewLine
+    $popupText += 'Full log: ' + $LogFile + [Environment]::NewLine
+    if ($hadError) { $popupText += [Environment]::NewLine + 'Some phases reported errors - see the log for details.' }
+    elseif ($restartRecommended) { $popupText += [Environment]::NewLine + 'A restart is recommended to finish applying repairs.' }
+    try {
+        (New-Object -ComObject WScript.Shell).Popup($popupText, 0, $popupTitle, 64) | Out-Null
+    }
+    catch { }
+}
+
+if ($Host.Name -eq 'ConsoleHost' -and -not $ScheduledRun) {
     Read-Host 'Press Enter to close'
 }
+
+if ($hadError) {
+    exit 2
+}
+if ($restartRecommended) {
+    exit 1
+}
+exit 0

@@ -1,5 +1,7 @@
 # Windows Health Repair
 
+[![CI](https://github.com/KingStan0/Windows-Health-Repair/actions/workflows/ci.yml/badge.svg)](https://github.com/KingStan0/Windows-Health-Repair/actions/workflows/ci.yml)
+
 One-click PowerShell utility that repairs and cleans your Windows system: component store (DISM), protected system files (SFC), and safe disk cleanup - all in the correct order, fully logged.
 
 ## Description
@@ -15,12 +17,17 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 ## Features
 
 - **One click** - double-click `Repair Windows Health.bat`, accept the UAC prompt, done
+- **Report-only mode** - `-ReportOnly` checks health (DISM scan, `sfc /verifyonly`) without repairing or deleting anything
+- **Scheduled maintenance** - `-Schedule` registers a weekly Sunday-03:00 task running with highest privileges (no popup, no reboot prompt)
+- **Local repair source** - if Windows Update cannot provide DISM repair files, the script automatically retries with a local Windows ISO (`install.wim`/`install.esd`) if one is found or passed with `-Source`
 - **Correct repair order** - DISM before SFC, so SFC has clean files to copy from
 - **Accurate results** - real exit codes captured via the .NET Process API (works on PowerShell 5.1, where `Start-Process` cannot provide exit codes)
 - **SFC verdict even when silent** - falls back to `CBS.log` analysis when `sfc` writes no summary output
 - **Hang detection** - warns (never kills) if DISM/SFC sit with zero CPU activity for an extended period
 - **Full logging** - timestamped `WindowsHealthRepair_<date>.log` saved next to the script, with per-phase timings, a summary table, and disk-space delta; old logs auto-pruned (keep the last 10 by default)
 - **Phase progress** - live progress bar and window title showing overall completion
+- **Exit codes** - `0` all healthy, `1` repairs applied / restart recommended, `2` one or more phases errored (scriptable)
+- **Completion popup** - a summary dialog at the end (can be disabled via config; always suppressed in scheduled runs)
 - **Configurable** - every phase and cleanup target can be toggled via `WindowsHealthRepair.json` (no code edits needed)
 - **Safe** - temp-only cleanup, Windows Update services stopped/restarted properly, reboot prompt only when repairs actually require it. Your files are never touched: the recycle bin is only emptied if you pass `-EmptyRecycleBin`
 - **Diagnostic guidance** - on DISM failures, points to Safe Mode / Windows ISO source next steps and logs the relevant log tails
@@ -42,7 +49,7 @@ Repair Windows Health.bat
 ### Manual
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "Repair-WindowsHealth.ps1"
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "Repair-WindowsHealth.ps1"
 ```
 
 Optional parameters:
@@ -50,8 +57,21 @@ Optional parameters:
 | Parameter | Effect |
 |-----------|--------|
 | `-EmptyRecycleBin` | Also empty the Recycle Bin during Phase 3 (off by default) |
+| `-ReportOnly` | Health check only: DISM ScanHealth + `sfc /verifyonly`, no repairs, no cleanup |
+| `-Schedule` | Register a weekly scheduled task (Sundays 03:00, highest privileges) and exit |
+| `-Unschedule` | Remove the scheduled task and exit |
+| `-ScheduledRun` | Internal flag the scheduled task passes: suppresses the popup, restart prompt, and "Press Enter" pause |
+| `-Source <path>` | Path to a Windows ISO image (`install.wim`/`install.esd`) or a folder containing `sources\install.wim`/`.esd`, used as fallback when DISM RestoreHealth fails to download from Windows Update |
 
 The script re-launches itself elevated via UAC if needed.
+
+## Automation
+
+The script is designed for scripting and scheduled runs:
+
+- **Exit codes**: `0` = all healthy, `1` = repairs were applied (restart recommended), `2` = one or more phases errored.
+- **Scheduled task**: run `Repair-WindowsHealth.ps1 -Schedule` once from an elevated prompt to install a weekly Sunday 03:00 task that runs the full repair with highest privileges. Logs are written to the script folder, so the task can point at any copy of the script. Remove it later with `-Unschedule`.
+- **Silent runs**: add `-ScheduledRun` to any manual invocation to suppress the popup, restart prompt, and "Press Enter" pause - useful for CI or scheduled runs outside the registered task.
 
 ## Configuration
 
@@ -65,6 +85,7 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 | `StallWarnMinutes` / `SfcStallWarnMinutes` | `12` / `15` | watchdog warning threshold per tool |
 | `LogRetentionCount` / `CleanupOldLogs` | `10` / `true` | how many logs to keep |
 | `TcpCheckTimeoutSeconds` | `5` | internet pre-check timeout |
+| `ShowCompletionPopup` | `true` | show a completion dialog at the end (always suppressed with `-ScheduledRun`) |
 
 ## What to expect
 

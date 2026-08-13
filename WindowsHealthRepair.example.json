@@ -12,5 +12,6 @@
   "CleanCurrentUserTemp": true,
   "CleanAllUsersTemp": true,
   "CleanSystemTemp": true,
-  "TcpCheckTimeoutSeconds": 5
+  "TcpCheckTimeoutSeconds": 5,
+  "ShowCompletionPopup": true
 }
