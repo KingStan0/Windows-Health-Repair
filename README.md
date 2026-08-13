@@ -85,6 +85,21 @@ At the end, the script shows a summary table (per-phase result + elapsed time, t
 - DISM: `%SystemRoot%\Logs\DISM\dism.log`
 - SFC: `%SystemRoot%\Logs\CBS\CBS.log`
 
+## Security and Windows Defender
+
+This tool is designed to stay clear of antivirus heuristics:
+
+- **No `-ExecutionPolicy Bypass`** - the launcher uses `RemoteSigned` and automatically removes the Mark-of-the-Web (`Unblock-File`) from the script, so downloaded copies run normally instead of looking like a bypass dropper
+- **No obfuscation** - no encoded commands, no `Invoke-Expression`, no string tricks; the script is plain, readable PowerShell
+- **No registry tweaks, no services disabled, no persistence** - it stops `wuauserv`/`bits` briefly to clear the update cache and restarts them immediately (logged)
+- **Everything is auditable** - every action is written to the log
+
+If Windows Defender still flags it (heuristic detection of unknown, unsigned scripts is possible):
+
+1. **Prefer a `git clone`** over downloading the ZIP - cloned files have no Mark-of-the-Web
+2. **Add a folder exclusion** (Settings > Privacy & security > Windows Security > Virus & threat protection > Manage settings > Exclusions > Add folder) for the folder containing the script
+3. **Sign the script** - the definitive fix is a code-signing certificate (e.g. self-signed installed in Trusted Publishers, or a proper cert)
+
 ## Disclaimer
 
 This tool runs built-in Windows repair utilities. It does not modify or delete any user data - cleanup is limited to system temp files, the Windows Update cache, and superseded component store versions; the Recycle Bin is only touched with `-EmptyRecycleBin`. That said, use at your own risk. A system backup is always a good idea before major repair operations.
