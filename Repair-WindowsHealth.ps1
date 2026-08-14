@@ -10,10 +10,29 @@ param(
     [string]$Source = ''
 )
 
+function Build-RelaunchArgs {
+    param(
+        [Parameter(Mandatory)][hashtable]$BoundParameters,
+        [Parameter(Mandatory)][string]$CommandPath
+    )
+    $args = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"{0}"' -f $CommandPath))
+    foreach ($key in $BoundParameters.Keys) {
+        $value = $BoundParameters[$key]
+        if ($value -is [switch] -or $value -is [bool]) {
+            if ($value) { $args += '-' + $key }
+        }
+        else {
+            $args += '-' + $key
+            $args += ('"{0}"' -f ([string]$value))
+        }
+    }
+    return $args
+}
+
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     try {
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"{0}"' -f $PSCommandPath))
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList (Build-RelaunchArgs -BoundParameters $PSBoundParameters -CommandPath $PSCommandPath)
     }
     catch {
         [Console]::WriteLine('This script requires Administrator privileges.')
@@ -50,13 +69,25 @@ $config = @{
     TcpCheckTimeoutSeconds = 5
     ShowCompletionPopup    = $true
 }
+
+function Coerce-ConfigValue {
+    param($DefaultValue, $LoadedValue)
+    if ($DefaultValue -is [bool] -and $LoadedValue -is [string]) {
+        if ($LoadedValue -match '^(?i:true|1|yes)$') { return $true }
+        if ($LoadedValue -match '^(?i:false|0|no)$') { return $false }
+    }
+    return $LoadedValue
+}
+
 $ConfigPath = Join-Path $ScriptDir 'WindowsHealthRepair.json'
 $configSource = 'built-in defaults'
 if (Test-Path -LiteralPath $ConfigPath) {
     try {
         $loaded = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
         foreach ($prop in $loaded.PSObject.Properties) {
-            if ($config.ContainsKey($prop.Name)) { $config[$prop.Name] = $prop.Value }
+            if ($config.ContainsKey($prop.Name)) {
+                $config[$prop.Name] = Coerce-ConfigValue -DefaultValue $config[$prop.Name] -LoadedValue $prop.Value
+            }
         }
         $configSource = 'WindowsHealthRepair.json'
     }
@@ -164,7 +195,7 @@ function Invoke-NativeTool {
     $useRedirect = [bool]$OutputFile
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
-    $psi.Arguments = ($ArgumentList -join ' ')
+    $psi.Arguments = (($ArgumentList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' ')
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $useRedirect
     if ($useRedirect) {
@@ -182,7 +213,14 @@ function Invoke-NativeTool {
     $stallSeconds = 0
     $warned = $false
     while (-not $proc.WaitForExit(15000)) {
-        $cpu = $proc.TotalProcessorTime.TotalSeconds
+        try {
+            $cpu = $proc.TotalProcessorTime.TotalSeconds
+        }
+        catch {
+            $lastCpu = $null
+            $stallSeconds = 0
+            continue
+        }
         if ($null -eq $lastCpu) {
             $lastCpu = $cpu
         }
@@ -414,6 +452,20 @@ if ($config.RunSfc) {
         $sfcResultText = 'Undetermined'
         Write-Log 'SFC result: could not be determined from CBS.log. Details below.' -Color Yellow
         Add-LogTail -Path "$env:SystemRoot\Logs\CBS\CBS.log" -Label 'CBS log'
+    }
+    if ($ReportOnly -and $sfcExit -eq 1 -and $sfcResultText -eq 'Undetermined') {
+        $hadError = $true
+        $sfcResultText = 'Violations found'
+        Write-Log 'SFC result: /verifyonly reported integrity violations (exit 1). Run the script in normal mode to repair them.' -Color Yellow
+    }
+    if ($sfcExit -eq 2) {
+        $restartRecommended = $true
+        if ($sfcResultText -eq 'Healthy') { $sfcResultText = 'Pending reboot' }
+        Write-Log 'SFC result: repairs are pending a reboot (exit 2). Restart to finish applying them.' -Color Yellow
+    }
+    elseif ($sfcExit -eq 3) {
+        $hadError = $true
+        Write-Log 'SFC result: could not repair some files (exit 3). Restart, then run this script again.' -Color Yellow
     }
     Add-PhaseResult -Name 'SFC' -Detail ($sfcResultText + ' (exit ' + $sfcExit + ')') -Seconds $sfcSw.Elapsed.TotalSeconds
 }

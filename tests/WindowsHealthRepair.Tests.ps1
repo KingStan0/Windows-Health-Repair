@@ -15,6 +15,8 @@ BeforeAll {
 
     . ([scriptblock]::Create((Get-DefinedFunction 'Format-Duration').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-DismLocalSource').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Build-RelaunchArgs').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Coerce-ConfigValue').Extent.Text))
 }
 
 Describe 'Script file sanity' {
@@ -43,7 +45,7 @@ Describe 'Script file sanity' {
     }
 
     It 'defines all required functions' {
-        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-DismLocalSource', 'Get-DirSizeBytes', 'Add-LogTail')) {
+        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-DismLocalSource', 'Get-DirSizeBytes', 'Add-LogTail', 'Build-RelaunchArgs', 'Coerce-ConfigValue')) {
             Get-DefinedFunction $name | Should -Not -BeNullOrEmpty
         }
     }
@@ -68,6 +70,59 @@ Describe 'Script file sanity' {
         $sfcLines = $Ast.Extent.Text -split "`n"
         $sfcCall = ($sfcLines | Where-Object { $_ -match 'sfc\.exe' }) -join "`n"
         $sfcCall | Should -Not -Match 'OutputFile'
+    }
+
+    It 'forwards bound parameters through the UAC relaunch' {
+        $relaunch = (Get-DefinedFunction 'Build-RelaunchArgs').Extent.Text
+        $relaunch | Should -Match 'BoundParameters'
+        $relaunch | Should -Match 'RemoteSigned'
+    }
+
+    It 'handles SFC exit codes 2 (pending reboot) and 3 (failure)' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'sfcExit -eq 2'
+        $body | Should -Match 'sfcExit -eq 3'
+    }
+
+    It 'quotes native tool arguments (paths with spaces)' {
+        $invoke = Get-DefinedFunction 'Invoke-NativeTool'
+        $invoke.Extent.Text | Should -Match '-replace .*"'
+    }
+}
+
+Describe 'Build-RelaunchArgs' {
+    It 'returns the base command when no parameters are bound' {
+        $args = Build-RelaunchArgs -BoundParameters @{} -CommandPath 'C:\tools\Repair-WindowsHealth.ps1'
+        $args[0..3] | Should -Be @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File')
+        $args[4] | Should -Be '"C:\tools\Repair-WindowsHealth.ps1"'
+        $args.Count | Should -Be 5
+    }
+
+    It 'appends bound switches as -Name' {
+        $args = Build-RelaunchArgs -BoundParameters @{ ReportOnly = $true; EmptyRecycleBin = $false } -CommandPath 'C:\test.ps1'
+        $args | Should -Contain '-ReportOnly'
+        $args | Should -Not -Contain '-EmptyRecycleBin'
+    }
+
+    It 'appends bound values quoted' {
+        $args = Build-RelaunchArgs -BoundParameters @{ Source = 'C:\My ISO\sources\install.wim' } -CommandPath 'C:\test.ps1'
+        $args | Should -Contain '-Source'
+        $args | Should -Contain '"C:\My ISO\sources\install.wim"'
+    }
+}
+
+Describe 'Coerce-ConfigValue' {
+    It 'converts string true/false to booleans' {
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue 'false' | Should -Be $false
+        Coerce-ConfigValue -DefaultValue $false -LoadedValue 'true' | Should -Be $true
+        Coerce-ConfigValue -DefaultValue $false -LoadedValue 'FALSE' | Should -Be $false
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue '1' | Should -Be $true
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue '0' | Should -Be $false
+    }
+
+    It 'passes through JSON booleans and other types unchanged' {
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue $false | Should -Be $false
+        Coerce-ConfigValue -DefaultValue 10 -LoadedValue '10' | Should -Be '10'
     }
 }
 
