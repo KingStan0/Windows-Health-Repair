@@ -18,6 +18,9 @@ BeforeAll {
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-SfcCbsResult').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Build-RelaunchArgs').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Coerce-ConfigValue').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Get-ChkdskExitText').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Get-UnrepairableSfcFiles').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Get-PendingReboot').Extent.Text))
 }
 
 Describe 'Script file sanity' {
@@ -38,17 +41,30 @@ Describe 'Script file sanity' {
         $content | Should -Not -Match 'FromBase64String'
     }
 
-    It 'declares the v1.1 parameter set' {
+    It 'declares the parameter set' {
         $paramNames = $Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
-        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin')) {
+        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin', 'CheckDisk')) {
             $paramNames | Should -Contain $name
         }
     }
 
     It 'defines all required functions' {
-        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-DismLocalSource', 'Get-DirSizeBytes', 'Add-LogTail', 'Build-RelaunchArgs', 'Coerce-ConfigValue')) {
+        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-DismLocalSource', 'Get-DirSizeBytes', 'Add-LogTail', 'Build-RelaunchArgs', 'Coerce-ConfigValue', 'Get-ChkdskExitText', 'Get-UnrepairableSfcFiles', 'Get-PendingReboot')) {
             Get-DefinedFunction $name | Should -Not -BeNullOrEmpty
         }
+    }
+
+    It 'adds the Chkdsk config keys to defaults' {
+        $defaultBlock = ($Ast.Find({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true) |
+            Where-Object { $_.Extent.Text -match 'LogRetentionCount' } | Select-Object -First 1).Extent.Text
+        $defaultBlock | Should -Match 'RunChkdsk'
+        $defaultBlock | Should -Match 'ChkdskStallWarnMinutes'
+    }
+
+    It 'never uses chkdsk /f or /r (which lock the volume or need a reboot)' {
+        $chkLines = ($Ast.Extent.Text -split "`n") | Where-Object { $_ -match 'chkdsk' }
+        ($chkLines -join "`n") | Should -Not -Match "chkdsk.*'/f'"
+        ($chkLines -join "`n") | Should -Not -Match "chkdsk.*'/r'"
     }
 
     It 'has a fatal-error trap after the log function' {
@@ -121,7 +137,7 @@ Describe 'Coerce-ConfigValue' {
         Coerce-ConfigValue -DefaultValue $true -LoadedValue '0' | Should -Be $false
     }
 
-It 'passes through JSON booleans and other types unchanged' {
+    It 'passes through JSON booleans and other types unchanged' {
         Coerce-ConfigValue -DefaultValue $true -LoadedValue $false | Should -Be $false
         Coerce-ConfigValue -DefaultValue 10 -LoadedValue '10' | Should -Be '10'
     }
@@ -194,5 +210,35 @@ Describe 'Get-DismLocalSource' {
 
     It 'returns empty when no manual source is given' {
         Get-DismLocalSource -ManualSource '' | Should -Be ''
+    }
+}
+
+Describe 'Get-ChkdskExitText' {
+    It 'maps chkdsk exit codes to result text' {
+        Get-ChkdskExitText -ExitCode 0 | Should -Be 'No errors found'
+        Get-ChkdskExitText -ExitCode 1 | Should -Be 'Errors found and fixed'
+        Get-ChkdskExitText -ExitCode 2 | Should -Be 'Disk cleanup performed or not run'
+        Get-ChkdskExitText -ExitCode 3 | Should -Be 'Could not check the disk'
+        Get-ChkdskExitText -ExitCode 99 | Should -Be 'Unknown result'
+    }
+}
+
+Describe 'Get-UnrepairableSfcFiles' {
+    It 'extracts unique unrepairable file names from CBS.log lines' {
+        $Cbs = Join-Path $TestDrive 'CBS.log'
+        Set-Content -LiteralPath $Cbs -Value @(
+            '2026-08-14 13:00:00, Info CSI 00000001 [SR] Cannot repair member file [l:12]""C:\Windows\System32\bad1.dll"" of Component'
+            '2026-08-14 13:00:05, Info CSI 00000002 [SR] Cannot repair member file [l:12]""C:\Windows\System32\bad2.dll"" of Component'
+            '2026-08-14 13:00:06, Info CSI 00000003 [SR] Cannot repair member file [l:12]""C:\Windows\System32\bad1.dll"" of Component'
+            '2026-08-14 13:00:07, Info CSI 00000004 [SR] Repaired 1 files'
+        ) -Encoding UTF8
+        $r = Get-UnrepairableSfcFiles -CbsPath $Cbs
+        $r | Should -Contain 'C:\Windows\System32\bad1.dll'
+        $r | Should -Contain 'C:\Windows\System32\bad2.dll'
+        ($r | Where-Object { $_ -eq 'C:\Windows\System32\bad1.dll' }).Count | Should -Be 1
+    }
+
+    It 'returns empty for a missing CBS.log' {
+        Get-UnrepairableSfcFiles -CbsPath (Join-Path $TestDrive 'nope.log') | Should -Be $null
     }
 }

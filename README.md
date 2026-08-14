@@ -11,6 +11,7 @@ System file corruption on Windows is usually fixed by three tools: DISM, SFC, an
 1. **DISM ScanHealth + RestoreHealth** - repairs the Windows component store (the source SFC copies files from)
 2. **sfc /scannow** - repairs protected system files using the now-healthy store
 3. **Disk cleanup** - superseded component cleanup, Windows Update cache, temp files, and optionally the recycle bin
+4. **Optional file-system check** - `chkdsk /scan` (online, no reboot) with a `fsutil dirty query` pre-check, enabled with `-CheckDisk`
 
 No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Windows repair utilities, run correctly.
 
@@ -20,6 +21,11 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 - **Report-only mode** - `-ReportOnly` checks health (DISM scan, `sfc /verifyonly`) without repairing or deleting anything
 - **Scheduled maintenance** - `-Schedule` registers a weekly Sunday-03:00 task running with highest privileges (no popup, no reboot prompt)
 - **Local repair source** - if Windows Update cannot provide DISM repair files, the script automatically retries with a local Windows ISO (`install.wim`/`install.esd`) if one is found or passed with `-Source`
+- **File-system check** - optional `chkdsk /scan` (online, no reboot) plus a `fsutil dirty query` pre-check, enabled with `-CheckDisk`
+- **Component store analysis** - the component store is analyzed (`AnalyzeComponentStore`) before cleanup so reclaimable space is reported before anything is removed
+- **System health baseline** - the log header records uptime, per-volume free space, memory, pending-reboot status, and recent System errors
+- **SFC second pass** - if the first `sfc` pass applied repairs, a second pass runs to catch dependent files the first pass may have missed
+- **Actionable SFC failures** - on `sfc` exit 3, the specific unrepairable files are extracted from CBS.log and `chkdsk` is suggested next
 - **Correct repair order** - DISM before SFC, so SFC has clean files to copy from
 - **Accurate results** - real exit codes captured via the .NET Process API (works on PowerShell 5.1, where `Start-Process` cannot provide exit codes)
 - **SFC verdict from CBS.log** - sfc runs with its native progress visible (never output-redirected); the result is verified against `CBS.log` (`[SR] Repairing` / `[SR] Repaired` markers) for an accurate verdict either way
@@ -62,6 +68,7 @@ Optional parameters:
 | `-Unschedule` | Remove the scheduled task and exit |
 | `-ScheduledRun` | Internal flag the scheduled task passes: suppresses the popup, restart prompt, and "Press Enter" pause |
 | `-Source <path>` | Path to a Windows ISO image (`install.wim`/`install.esd`) or a folder containing `sources\install.wim`/`.esd`, used as fallback when DISM RestoreHealth fails to download from Windows Update |
+| `-CheckDisk` | Also run `chkdsk <systemdrive> /scan` (online file-system check, no reboot) after SFC |
 
 The script re-launches itself elevated via UAC if needed.
 
@@ -81,6 +88,8 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 |-----|---------|--------|
 | `RunDismScan` / `RunDismRestore` / `RunSfc` | `true` | toggle repair phases |
 | `RunComponentCleanup` / `RunWindowsUpdateCache` / `RunTempCleanup` | `true` | toggle cleanup phases |
+| `RunChkdsk` | `false` | toggle the file-system check phase (also requires `-CheckDisk`) |
+| `ChkdskStallWarnMinutes` | `15` | watchdog warning threshold for the chkdsk scan |
 | `CleanCurrentUserTemp` / `CleanAllUsersTemp` / `CleanSystemTemp` | `true` | temp locations cleaned (all users' `AppData\Local\Temp` included) |
 | `StallWarnMinutes` / `SfcStallWarnMinutes` | `12` / `15` | watchdog warning threshold per tool |
 | `LogRetentionCount` / `CleanupOldLogs` | `10` / `true` | how many logs to keep |
@@ -94,7 +103,8 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 | Pre-flight | DISM CheckHealth | seconds |
 | Phase 1 | DISM ScanHealth / RestoreHealth | 5-15 minutes |
 | Phase 2 | sfc /scannow | 1-15 minutes |
-| Phase 3 | StartComponentCleanup, WU cache, temp files, recycle bin (optional) | ~1 minute |
+| Phase 2b | chkdsk /scan (optional, `-CheckDisk`) | 1-10 minutes |
+| Phase 3 | AnalyzeComponentStore + StartComponentCleanup, WU cache, temp files, recycle bin (optional) | ~2 minutes |
 
 DISM RestoreHealth may appear stuck at a percentage (commonly 20% or 62.3%) - that is normal while it downloads. Let it finish; do not close the window or kill the process.
 

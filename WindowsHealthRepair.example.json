@@ -9,6 +9,8 @@
   "RunComponentCleanup": true,
   "RunWindowsUpdateCache": true,
   "RunTempCleanup": true,
+  "RunChkdsk": false,
+  "ChkdskStallWarnMinutes": 15,
   "CleanCurrentUserTemp": true,
   "CleanAllUsersTemp": true,
   "CleanSystemTemp": true,

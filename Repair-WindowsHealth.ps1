@@ -7,7 +7,8 @@ param(
     [switch]$Schedule,
     [switch]$Unschedule,
     [switch]$ScheduledRun,
-    [string]$Source = ''
+    [string]$Source = '',
+    [switch]$CheckDisk
 )
 
 function Build-RelaunchArgs {
@@ -63,6 +64,8 @@ $config = @{
     RunComponentCleanup    = $true
     RunWindowsUpdateCache  = $true
     RunTempCleanup         = $true
+    RunChkdsk              = $false
+    ChkdskStallWarnMinutes = 15
     CleanCurrentUserTemp   = $true
     CleanAllUsersTemp      = $true
     CleanSystemTemp        = $true
@@ -135,6 +138,7 @@ if ($config.RunDismScan -and -not $ReportOnly) { [void]$steps.Add('DISM ScanHeal
 if ($config.RunDismScan -and $ReportOnly) { [void]$steps.Add('DISM ScanHealth (report)') }
 if ($config.RunDismRestore -and -not $ReportOnly) { [void]$steps.Add('DISM RestoreHealth') }
 if ($config.RunSfc) { [void]$steps.Add('SFC') }
+if ($config.RunChkdsk -and $CheckDisk -and -not $ReportOnly) { [void]$steps.Add('Disk check') }
 if ($config.RunComponentCleanup -and -not $ReportOnly) { [void]$steps.Add('Component cleanup') }
 if ($config.RunWindowsUpdateCache -and -not $ReportOnly) { [void]$steps.Add('Windows Update cache') }
 if ($config.RunTempCleanup -and -not $ReportOnly) { [void]$steps.Add('Temp files') }
@@ -241,7 +245,9 @@ function Add-LogTail {
 
 function Get-DirSizeBytes {
     param([string]$Path)
-    (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $sum = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $sum) { return [long]0 }
+    return $sum
 }
 
 function Get-SfcCbsResult {
@@ -297,6 +303,37 @@ function Get-DismLocalSource {
     return ''
 }
 
+function Get-PendingReboot {
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+    )
+    foreach ($p in $paths) {
+        if (Test-Path -LiteralPath $p) { return $true }
+    }
+    return $false
+}
+
+function Get-UnrepairableSfcFiles {
+    param(
+        [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
+    )
+    if (-not (Test-Path -LiteralPath $CbsPath)) { return @() }
+    $names = @(Get-Content -LiteralPath $CbsPath -Tail 3000 |
+        Select-String -Pattern '\[SR\] Cannot repair member file.*?"([^"]+)"' |
+        ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -Unique)
+    return $names
+}
+
+function Get-ChkdskExitText {
+    param([int]$ExitCode)
+    if ($ExitCode -eq 0) { return 'No errors found' }
+    if ($ExitCode -eq 1) { return 'Errors found and fixed' }
+    if ($ExitCode -eq 2) { return 'Disk cleanup performed or not run' }
+    if ($ExitCode -eq 3) { return 'Could not check the disk' }
+    return 'Unknown result'
+}
+
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
 $driveName = $env:SystemDrive.TrimEnd(':')
 $freeBefore = (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue).Free
@@ -318,12 +355,49 @@ Write-Log '===================================================================='
 Write-Log ''
 
 Show-Progress 'Pre-flight'
+
+Write-Log 'SYSTEM BASELINE:' -Color Cyan
+try {
+    $uptime = (Get-Date) - (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+    if ($uptime -gt [TimeSpan]::Zero) {
+        Write-Log ('  Uptime : ' + '{0}d {1}h {2}m' -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
+    }
+}
+catch { }
+try {
+    $osMem = Get-CimInstance -ClassName Win32_OperatingSystem
+    $availMemGb = $osMem.FreePhysicalMemory / 1MB
+    $totalMemGb = $osMem.TotalVisibleMemorySize / 1MB
+    Write-Log ('  Memory : {0:N1} GB free of {1:N1} GB ({2:P0} free)' -f $availMemGb, $totalMemGb, ($availMemGb / $totalMemGb))
+}
+catch { }
+try {
+    foreach ($d in (Get-PSDrive -PSProvider FileSystem | Where-Object { $null -ne $_.Root -and $null -ne $_.Free })) {
+        Write-Log ('  Drive  : {0} {1:N1} GB free of {2:N1} GB' -f $d.Name, ($d.Free / 1GB), (($d.Used + $d.Free) / 1GB))
+    }
+}
+catch { }
+try {
+    $pending = Get-PendingReboot
+    $pendingText = 'No'
+    if ($pending) { $pendingText = 'Yes'; $restartRecommended = $true }
+    Write-Log ('  Pending reboot : ' + $pendingText)
+}
+catch { }
+try {
+    $errSince = (Get-Date).AddHours(-24)
+    $sysErrors = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Level = 1, 2; StartTime = $errSince } -ErrorAction SilentlyContinue)
+    Write-Log ('  System errors (last 24h) : ' + $sysErrors.Count)
+}
+catch { Write-Log '  System errors (last 24h) : unavailable' }
+Write-Log ''
+
 Write-Log 'PRE-FLIGHT: Admin mode confirmed. Running DISM quick health check (CheckHealth)...' -Color Cyan
 $checkSw = [System.Diagnostics.Stopwatch]::StartNew()
-& dism.exe /Online /Cleanup-Image /CheckHealth | Out-Null
+$checkExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/CheckHealth') -Phase 'DISM CheckHealth' -StallWarnMinutes $config.StallWarnMinutes
 $checkSw.Stop()
-Write-Log ('CheckHealth exit code: ' + $LASTEXITCODE + ' (0 = no known corruption flag)')
-Add-PhaseResult -Name 'CheckHealth' -Detail ('exit ' + $LASTEXITCODE) -Seconds $checkSw.Elapsed.TotalSeconds
+Write-Log ('CheckHealth exit code: ' + $checkExit + ' (0 = no known corruption flag)')
+Add-PhaseResult -Name 'CheckHealth' -Detail ('exit ' + $checkExit) -Seconds $checkSw.Elapsed.TotalSeconds
 
 $tcp = New-Object System.Net.Sockets.TcpClient
 $connected = $false
@@ -431,6 +505,8 @@ if ($config.RunSfc) {
     $sfcSw.Stop()
 
     $cbsResult = Get-SfcCbsResult -Since $totalRunStart
+    $repairingAfterFirst = $cbsResult.RepairingTotal
+    $repairedAfterFirst = $cbsResult.RepairedFiles
     if ($cbsResult.RepairingTotal -eq 0 -and $cbsResult.RepairedFiles -eq 0) {
         $sfcResultText = 'Healthy'
         Write-Log 'SFC result: verified via CBS.log - no components needed repair. System files are healthy.' -Color Green
@@ -457,6 +533,22 @@ if ($config.RunSfc) {
         $sfcResultText = 'Violations found'
         Write-Log 'SFC result: /verifyonly reported integrity violations (exit 1). Run the script in normal mode to repair them.' -Color Yellow
     }
+    if (-not $ReportOnly -and $sfcResultText -eq 'Repaired') {
+        Write-Log 'SFC reported repairs on the first pass. Running a second pass to catch dependent files the first pass may have missed...' -Color Yellow
+        $sfcExit2 = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList '/scannow' -Phase 'SFC (second pass)' -StallWarnMinutes $config.SfcStallWarnMinutes
+        Write-Log ('SFC second pass finished with exit code ' + $sfcExit2)
+        if ($null -ne $sfcExit2 -and $sfcExit2 -ne 0) { $sfcExit = $sfcExit2 }
+        $cbsResult2 = Get-SfcCbsResult -Since $totalRunStart
+        $newRepairing = [Math]::Max(0, $cbsResult2.RepairingTotal - $repairingAfterFirst)
+        $newRepaired = [Math]::Max(0, $cbsResult2.RepairedFiles - $repairedAfterFirst)
+        if ($newRepairing -eq 0 -and $newRepaired -eq 0) {
+            $sfcResultText = 'Healthy'
+            Write-Log 'SFC second pass: no components needed repair. System files are now healthy.' -Color Green
+        }
+        else {
+            Write-Log 'SFC second pass: repairs were still applied. A restart is recommended.' -Color Green
+        }
+    }
     if ($sfcExit -eq 2) {
         $restartRecommended = $true
         if ($sfcResultText -eq 'Healthy') { $sfcResultText = 'Pending reboot' }
@@ -465,11 +557,61 @@ if ($config.RunSfc) {
     elseif ($sfcExit -eq 3) {
         $hadError = $true
         Write-Log 'SFC result: could not repair some files (exit 3). Restart, then run this script again.' -Color Yellow
+        $unrep = Get-UnrepairableSfcFiles
+        if ($unrep.Count -gt 0) {
+            Write-Log 'Files that could not be repaired:' -Color Yellow
+            foreach ($f in $unrep) { Write-Log ('  - ' + $f) }
+        }
+        Write-Log 'Next steps: run chkdsk /scan to check the file system, then run this script again. If it still fails, the disk itself may be failing.' -Color Yellow
     }
     Add-PhaseResult -Name 'SFC' -Detail ($sfcResultText + ' (exit ' + $sfcExit + ')') -Seconds $sfcSw.Elapsed.TotalSeconds
 }
 else {
     Write-Log 'SFC skipped (config: RunSfc = false).' -Color Yellow
+}
+
+if ($config.RunChkdsk -and $CheckDisk -and -not $ReportOnly) {
+    Show-Progress 'Disk check'
+    Write-Log 'Checking the file system with chkdsk (online /scan, no reboot required)...' -Color Green
+    try {
+        $dirtyOut = @(& fsutil.exe dirty query "$env:SystemDrive\" 2>$null)
+        $dirtyText = $dirtyOut -join ' '
+        if ($dirtyText -match '(?i:not dirty)') {
+            Write-Log 'File system dirty bit: not set (no pending repair required).'
+        }
+        elseif ($dirtyText -match '(?i:dirty)') {
+            Write-Log 'File system dirty bit: set - a repair is pending a reboot.' -Color Yellow
+            $restartRecommended = $true
+        }
+        else {
+            Write-Log 'File system dirty bit: could not be determined.'
+        }
+    }
+    catch {
+        Write-Log 'File system dirty bit: could not be determined.'
+    }
+    $chkSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $chkExit = Invoke-NativeTool -FilePath 'chkdsk.exe' -ArgumentList @("$env:SystemDrive", '/scan') -Phase 'Disk check (chkdsk)' -StallWarnMinutes $config.ChkdskStallWarnMinutes
+    $chkSw.Stop()
+    $chkText = Get-ChkdskExitText -ExitCode $chkExit
+    Write-Log ('chkdsk finished with exit code ' + $chkExit + ' (' + $chkText + ')')
+    if ($null -ne $chkExit -and $chkExit -ne 0) {
+        $hadError = $true
+        $restartRecommended = $true
+        Write-Log 'File system errors were found. Run chkdsk /f during a reboot to repair them, then run this script again.' -Color Yellow
+    }
+    Add-PhaseResult -Name 'Disk check' -Detail ($chkText + ' (exit ' + $chkExit + ')') -Seconds $chkSw.Elapsed.TotalSeconds
+}
+else {
+    if ($ReportOnly) {
+        Write-Log 'Disk check skipped (report-only mode). Run with -CheckDisk to enable it.'
+    }
+    elseif (-not $CheckDisk) {
+        Write-Log 'Disk check skipped (pass -CheckDisk to enable it).'
+    }
+    else {
+        Write-Log 'Disk check skipped (config: RunChkdsk = false).'
+    }
 }
 
 Write-Log ''
@@ -479,6 +621,13 @@ Write-Log '===================================================================='
 
 if ($config.RunComponentCleanup -and -not $ReportOnly) {
     Show-Progress 'Component cleanup'
+    Write-Log 'Analyzing the component store (AnalyzeComponentStore) to report reclaimable space...' -Color Green
+    $analyzeSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $analyzeExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/AnalyzeComponentStore') -Phase 'AnalyzeComponentStore' -StallWarnMinutes $config.StallWarnMinutes
+    $analyzeSw.Stop()
+    Write-Log ('AnalyzeComponentStore finished with exit code ' + $analyzeExit)
+    if ($null -ne $analyzeExit -and $analyzeExit -ne 0) { $hadError = $true }
+    Add-PhaseResult -Name 'Component analysis' -Detail ('exit ' + $analyzeExit) -Seconds $analyzeSw.Elapsed.TotalSeconds
     Write-Log 'Cleaning up superseded components in the component store (StartComponentCleanup)...' -Color Green
     $cleanupSw = [System.Diagnostics.Stopwatch]::StartNew()
     $cleanupExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/StartComponentCleanup') -Phase 'StartComponentCleanup' -StallWarnMinutes $config.StallWarnMinutes
