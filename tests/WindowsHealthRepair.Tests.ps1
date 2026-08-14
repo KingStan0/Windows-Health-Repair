@@ -265,6 +265,17 @@ Describe 'Get-UnrepairableSfcFiles' {
     It 'returns empty for a missing CBS.log' {
         Get-UnrepairableSfcFiles -CbsPath (Join-Path $TestDrive 'nope.log') | Should -Be $null
     }
+
+    It 'ignores the AppX ?? placeholder in Cannot repair member file lines' {
+        $Cbs = Join-Path $TestDrive 'CBS2.log'
+        Set-Content -LiteralPath $Cbs -Value @(
+            '2026-08-14 13:00:00, Info CSI 00000001 [SR] Cannot repair member file [l:34{17}]"??" of AppX Microsoft.Windows.Cortana_1.0.0.0'
+            '2026-08-14 13:00:05, Info CSI 00000002 [SR] Cannot repair member file [l:12]""C:\Windows\System32\bad3.dll"" of Component'
+        ) -Encoding UTF8
+        $r = Get-UnrepairableSfcFiles -CbsPath $Cbs
+        $r | Should -Not -Contain '??'
+        $r | Should -Contain 'C:\Windows\System32\bad3.dll'
+    }
 }
 
 Describe 'Launcher batch file' {

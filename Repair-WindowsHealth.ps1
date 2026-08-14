@@ -258,7 +258,7 @@ function Get-SfcCbsResult {
     )
     $result = @{ RepairingTotal = 0; RepairedFiles = 0 }
     if (-not (Test-Path -LiteralPath $CbsPath)) { return $result }
-    $lines = @(Get-Content -LiteralPath $CbsPath -Tail 3000)
+    $lines = @(Get-Content -LiteralPath $CbsPath -Tail 5000)
     if ($null -ne $Since) {
         $parsed = @($lines | ForEach-Object {
             $m = [regex]::Match($_, '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')
@@ -320,9 +320,10 @@ function Get-UnrepairableSfcFiles {
         [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
     )
     if (-not (Test-Path -LiteralPath $CbsPath)) { return @() }
-    $names = @(Get-Content -LiteralPath $CbsPath -Tail 3000 |
+    $names = @(Get-Content -LiteralPath $CbsPath -Tail 5000 |
         Select-String -Pattern '\[SR\] Cannot repair member file.*?"([^"]+)"' |
-        ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -Unique)
+        ForEach-Object { $_.Matches[0].Groups[1].Value } |
+        Where-Object { $_ -ne '??' } | Select-Object -Unique)
     return $names
 }
 
@@ -411,7 +412,7 @@ catch {
 finally {
     $tcp.Dispose()
 }
-if (-not $connected) {
+if (-not $connected -and -not $config.SafeRestoreOnly) {
     Write-Log 'WARNING: No internet connection detected. DISM RestoreHealth needs Windows Update to download repair files and may fail.' -Color Yellow
 }
 
@@ -453,7 +454,7 @@ if ($config.RunDismRestore -and -not $ReportOnly) {
     $repairSw = [System.Diagnostics.Stopwatch]::StartNew()
     $localSource = Get-DismLocalSource -ManualSource $Source
     $dismRepairExit = $null
-    $restoreDetail = 'exit ' + $dismRepairExit
+    $restoreDetail = ''
     if ($config.SafeRestoreOnly) {
         if (-not $localSource) {
             $repairSw.Stop()
@@ -479,6 +480,7 @@ if ($config.RunDismRestore -and -not $ReportOnly) {
     $repairSw.Stop()
     if ($null -ne $dismRepairExit) {
         Write-Log ('DISM RestoreHealth finished with exit code ' + $dismRepairExit)
+        $restoreDetail = 'exit ' + $dismRepairExit
     }
     if ($null -ne $dismRepairExit -and $dismRepairExit -ne 0) {
         $hadError = $true
@@ -520,7 +522,6 @@ if ($config.RunSfc) {
     $sfcSw = [System.Diagnostics.Stopwatch]::StartNew()
     $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList $sfcArgs -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes
     Write-Log ('SFC finished with exit code ' + $sfcExit)
-    $sfcSw.Stop()
 
     $cbsResult = Get-SfcCbsResult -Since $totalRunStart
     $repairingAfterFirst = $cbsResult.RepairingTotal
@@ -561,12 +562,14 @@ if ($config.RunSfc) {
         $newRepaired = [Math]::Max(0, $cbsResult2.RepairedFiles - $repairedAfterFirst)
         if ($newRepairing -eq 0 -and $newRepaired -eq 0) {
             $sfcResultText = 'Healthy'
+            $sfcExit = $sfcExit2
             Write-Log 'SFC second pass: no components needed repair. System files are now healthy.' -Color Green
         }
         else {
             Write-Log 'SFC second pass: repairs were still applied. A restart is recommended.' -Color Green
         }
     }
+    $sfcSw.Stop()
     if ($sfcExit -eq 2) {
         $restartRecommended = $true
         if ($sfcResultText -eq 'Healthy') { $sfcResultText = 'Pending reboot' }
@@ -823,9 +826,7 @@ Write-Log ''
 Write-Log '====================================================================' -Color Cyan
 Write-Log 'SUMMARY' -Color Cyan
 Write-Log '====================================================================' -Color Cyan
-$totalSeconds = 0
 foreach ($r in $script:results) {
-    $totalSeconds += $r.Seconds
     Write-Log ('  {0,-22} {1,-36} {2}' -f $r.Name, $r.Detail, (Format-Duration $r.Seconds))
 }
 Write-Log '  --------------------------------------------------------------------'
