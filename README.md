@@ -22,7 +22,7 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 - **Local repair source** - if Windows Update cannot provide DISM repair files, the script automatically retries with a local Windows ISO (`install.wim`/`install.esd`) if one is found or passed with `-Source`
 - **Correct repair order** - DISM before SFC, so SFC has clean files to copy from
 - **Accurate results** - real exit codes captured via the .NET Process API (works on PowerShell 5.1, where `Start-Process` cannot provide exit codes)
-- **SFC verdict even when silent** - falls back to `CBS.log` analysis when `sfc` writes no summary output
+- **SFC verdict from CBS.log** - sfc runs with its native progress visible (never output-redirected); the result is verified against `CBS.log` (`[SR] Repairing` / `[SR] Repaired` markers) for an accurate verdict either way
 - **Hang detection** - warns (never kills) if DISM/SFC sit with zero CPU activity for an extended period
 - **Full logging** - timestamped `WindowsHealthRepair_<date>.log` saved next to the script, with per-phase timings, a summary table, and disk-space delta; old logs auto-pruned (keep the last 10 by default)
 - **Phase progress** - live progress bar and window title showing overall completion

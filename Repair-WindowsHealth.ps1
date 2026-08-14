@@ -264,7 +264,6 @@ $driveName = $env:SystemDrive.TrimEnd(':')
 $freeBefore = (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue).Free
 $restartRecommended = $false
 $hadError = $false
-$tempArtifacts = @()
 $sfcResultText = 'See log'
 $totalRunStart = Get-Date
 
@@ -389,68 +388,32 @@ if ($config.RunSfc) {
         Write-Log 'Running sfc /scannow. This usually takes 10-20 minutes.' -Color Green
     }
     $sfcSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $sfcTemp = Join-Path $env:TEMP ('sfc_out_{0}.txt' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-    $tempArtifacts += @($sfcTemp, ($sfcTemp + '.err'))
-    $sfcOutput = ''
     $sfcExit = -1
-    try {
-        $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList $sfcArgs -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes -OutputFile $sfcTemp
-        $sfcOutput = Get-Content -LiteralPath $sfcTemp -Raw -ErrorAction SilentlyContinue
-        $sfcErr = Get-Content -LiteralPath ($sfcTemp + '.err') -Raw -ErrorAction SilentlyContinue
-        $sfcCombined = [string]$sfcOutput + ' ' + [string]$sfcErr
-        Write-Log ('SFC finished with exit code ' + $sfcExit)
-    }
-    finally {
-        foreach ($artifact in $tempArtifacts) {
-            Remove-Item -LiteralPath $artifact -Force -ErrorAction SilentlyContinue
-        }
-    }
+    $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList $sfcArgs -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes
+    Write-Log ('SFC finished with exit code ' + $sfcExit)
     $sfcSw.Stop()
 
-    if ($ReportOnly) {
-        if ($sfcCombined -match 'did not find any integrity violations') {
-            $sfcResultText = 'Healthy'
-            Write-Log 'SFC result: no integrity violations found. System files are healthy.' -Color Green
-        }
-        elseif ($sfcCombined -match 'found corrupt files') {
+    $cbsResult = Get-SfcCbsResult
+    if ($cbsResult.RepairingTotal -eq 0 -and $cbsResult.RepairedFiles -eq 0) {
+        $sfcResultText = 'Healthy'
+        Write-Log 'SFC result: verified via CBS.log - no components needed repair. System files are healthy.' -Color Green
+    }
+    elseif ($cbsResult.RepairingTotal -gt 0 -or $cbsResult.RepairedFiles -gt 0) {
+        if ($ReportOnly) {
             $hadError = $true
             $sfcResultText = 'Violations found'
-            Write-Log 'SFC result: corrupt files were found. Run the script in normal mode to repair them.' -Color Yellow
+            Write-Log 'SFC result: verified via CBS.log - integrity violations were found. Run the script in normal mode to repair them.' -Color Yellow
         }
         else {
-            $sfcResultText = 'Undetermined'
-            Write-Log 'SFC result: could not be determined from output. Full log available below.' -Color Yellow
-        }
-    }
-    elseif ($sfcCombined -match 'did not find any integrity violations') {
-        $sfcResultText = 'Healthy'
-        Write-Log 'SFC result: no integrity violations found. System files are healthy.' -Color Green
-    }
-    elseif ($sfcCombined -match 'found corrupt files and successfully repaired them') {
-        $restartRecommended = $true
-        $sfcResultText = 'Repaired'
-        Write-Log 'SFC result: corrupt files were found and repaired. A restart is recommended.' -Color Green
-    }
-    elseif ($sfcCombined -match 'was unable to fix some of them') {
-        $restartRecommended = $true
-        $sfcResultText = 'Partially repaired'
-        Write-Log 'SFC result: some corrupt files could not be repaired. Restart, then run this script again; if it persists, repair Phase 1 with a Windows ISO source.' -Color Yellow
-    }
-    else {
-        $cbsResult = Get-SfcCbsResult
-        if ($cbsResult.RepairingTotal -eq 0 -and $cbsResult.RepairedFiles -eq 0) {
-            $sfcResultText = 'Healthy'
-            Write-Log 'SFC result: verified via CBS.log - no components needed repair. System files are healthy.' -Color Green
-        }
-        elseif ($cbsResult.RepairingTotal -gt 0 -or $cbsResult.RepairedFiles -gt 0) {
             $restartRecommended = $true
             $sfcResultText = 'Repaired'
             Write-Log 'SFC result: verified via CBS.log - repairs were applied. A restart is recommended.' -Color Green
         }
-        else {
-            Write-Log 'SFC result: could not be determined from output or CBS.log. Details below.' -Color Yellow
-            Add-LogTail -Path "$env:SystemRoot\Logs\CBS\CBS.log" -Label 'CBS log'
-        }
+    }
+    else {
+        $sfcResultText = 'Undetermined'
+        Write-Log 'SFC result: could not be determined from CBS.log. Details below.' -Color Yellow
+        Add-LogTail -Path "$env:SystemRoot\Logs\CBS\CBS.log" -Label 'CBS log'
     }
     Add-PhaseResult -Name 'SFC' -Detail ($sfcResultText + ' (exit ' + $sfcExit + ')') -Seconds $sfcSw.Elapsed.TotalSeconds
 }

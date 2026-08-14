@@ -63,6 +63,12 @@ Describe 'Script file sanity' {
         $invoke = Get-DefinedFunction 'Invoke-NativeTool'
         $invoke.Extent.Text | Should -Match 'null -ne .*ExitCode'
     }
+
+    It 'never redirects SFC output (so its native progress bar shows)' {
+        $sfcLines = $Ast.Extent.Text -split "`n"
+        $sfcCall = ($sfcLines | Where-Object { $_ -match 'sfc\.exe' }) -join "`n"
+        $sfcCall | Should -Not -Match 'OutputFile'
+    }
 }
 
 Describe 'Format-Duration' {
