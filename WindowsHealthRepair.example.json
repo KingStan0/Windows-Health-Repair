@@ -5,6 +5,7 @@
   "SfcStallWarnMinutes": 15,
   "RunDismScan": true,
   "RunDismRestore": true,
+  "SafeRestoreOnly": false,
   "RunSfc": true,
   "RunComponentCleanup": true,
   "RunWindowsUpdateCache": true,

@@ -54,11 +54,35 @@ Describe 'Script file sanity' {
         }
     }
 
-    It 'adds the Chkdsk config keys to defaults' {
+    It 'adds the new config keys to defaults' {
         $defaultBlock = ($Ast.Find({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true) |
             Where-Object { $_.Extent.Text -match 'LogRetentionCount' } | Select-Object -First 1).Extent.Text
         $defaultBlock | Should -Match 'RunChkdsk'
         $defaultBlock | Should -Match 'ChkdskStallWarnMinutes'
+        $defaultBlock | Should -Match 'SafeRestoreOnly'
+    }
+
+    It 'stops Delivery Optimization (dosvc) alongside wuauserv and bits' {
+        $wuBlock = [regex]::Match($Ast.Extent.Text, 'wuServices = @\([^)]*\)').Value
+        $wuBlock | Should -Match 'wuauserv'
+        $wuBlock | Should -Match 'dosvc'
+        $wuBlock | Should -Match 'bits'
+    }
+
+    It 'SafeRestoreOnly gates RestoreHealth behind a local source with /LimitAccess' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '\$config\.SafeRestoreOnly'
+        $body | Should -Match 'Get-DismLocalSource -ManualSource \$Source'
+        $body | Should -Match 'skipped \(SafeRestoreOnly, no local source\)'
+    }
+
+    It 'wraps all-users temp enumeration and deletion in try/catch' {
+        $body = $Ast.Extent.Text
+        $enum = [regex]::Match($body, '(?s)if \(\$config\.CleanAllUsersTemp\).*?Get-ChildItem -LiteralPath \$usersRoot -Directory')
+        $enum.Success | Should -Be $true
+        $enum.Value | Should -Match 'try \{'
+        $del = [regex]::Match($body, '(?s)Remove-Item -LiteralPath \$item\.FullName.*?catch')
+        $del.Success | Should -Be $true
     }
 
     It 'never uses chkdsk /f or /r (which lock the volume or need a reboot)' {
@@ -240,5 +264,12 @@ Describe 'Get-UnrepairableSfcFiles' {
 
     It 'returns empty for a missing CBS.log' {
         Get-UnrepairableSfcFiles -CbsPath (Join-Path $TestDrive 'nope.log') | Should -Be $null
+    }
+}
+
+Describe 'Launcher batch file' {
+    It 'forwards arguments passed to the .bat to the PowerShell script' {
+        $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health.bat') -Raw
+        $bat | Should -Match '-File .*Repair-WindowsHealth\.ps1" %\*'
     }
 }

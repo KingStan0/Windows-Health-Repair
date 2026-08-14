@@ -26,6 +26,8 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 - **System health baseline** - the log header records uptime, per-volume free space, memory, pending-reboot status, and recent System errors
 - **SFC second pass** - if the first `sfc` pass applied repairs, a second pass runs to catch dependent files the first pass may have missed
 - **Actionable SFC failures** - on `sfc` exit 3, the specific unrepairable files are extracted from CBS.log and `chkdsk` is suggested next
+- **Custom-OS safety** - with `SafeRestoreOnly` enabled, DISM RestoreHealth refuses to download from Windows Update and requires a local `install.wim`/`install.esd` source, so stripped telemetry/bloatware is never pulled back on debloated systems (LTSC, AtlasOS, etc.)
+- **Delivery Optimization handled** - the Windows Update cache phase also pauses `dosvc` so the download cache is fully released, restoring all services to their prior state
 - **Correct repair order** - DISM before SFC, so SFC has clean files to copy from
 - **Accurate results** - real exit codes captured via the .NET Process API (works on PowerShell 5.1, where `Start-Process` cannot provide exit codes)
 - **SFC verdict from CBS.log** - sfc runs with its native progress visible (never output-redirected); the result is verified against `CBS.log` (`[SR] Repairing` / `[SR] Repaired` markers) for an accurate verdict either way
@@ -35,7 +37,7 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 - **Exit codes** - `0` all healthy, `1` repairs applied / restart recommended, `2` one or more phases errored (scriptable)
 - **Completion popup** - a summary dialog at the end (can be disabled via config; always suppressed in scheduled runs)
 - **Configurable** - every phase and cleanup target can be toggled via `WindowsHealthRepair.json` (no code edits needed)
-- **Safe** - temp-only cleanup, Windows Update services paused only when running and restored to their prior state, reboot prompt only when repairs actually require it. Your files are never touched: the recycle bin is only emptied if you pass `-EmptyRecycleBin`
+- **Safe** - temp-only cleanup, Windows Update/Delivery Optimization services paused only when running and restored to their prior state, reboot prompt only when repairs actually require it. Your files are never touched: the recycle bin is only emptied if you pass `-EmptyRecycleBin`
 - **Diagnostic guidance** - on DISM failures, points to Safe Mode / Windows ISO source next steps and logs the relevant log tails
 
 ## Requirements
@@ -51,6 +53,8 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 ```bat
 Repair Windows Health.bat
 ```
+
+Arguments passed to the `.bat` are forwarded to the script, e.g. `Repair Windows Health.bat -CheckDisk -EmptyRecycleBin`.
 
 ### Manual
 
@@ -87,6 +91,7 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 | Key | Default | Effect |
 |-----|---------|--------|
 | `RunDismScan` / `RunDismRestore` / `RunSfc` | `true` | toggle repair phases |
+| `SafeRestoreOnly` | `false` | restrict DISM RestoreHealth to a local source (`-Source` or auto-detected `install.wim`/`.esd`); never downloads from Windows Update. For debloated/LTSC systems |
 | `RunComponentCleanup` / `RunWindowsUpdateCache` / `RunTempCleanup` | `true` | toggle cleanup phases |
 | `RunChkdsk` | `false` | toggle the file-system check phase (also requires `-CheckDisk`) |
 | `ChkdskStallWarnMinutes` | `15` | watchdog warning threshold for the chkdsk scan |

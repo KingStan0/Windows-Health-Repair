@@ -60,6 +60,7 @@ $config = @{
     SfcStallWarnMinutes    = 15
     RunDismScan            = $true
     RunDismRestore         = $true
+    SafeRestoreOnly        = $false
     RunSfc                 = $true
     RunComponentCleanup    = $true
     RunWindowsUpdateCache  = $true
@@ -448,23 +449,40 @@ else {
 
 if ($config.RunDismRestore -and -not $ReportOnly) {
     Show-Progress 'DISM RestoreHealth'
-    Write-Log 'Running DISM RestoreHealth (scans and repairs, downloads from Windows Update). This can take 10-30 minutes and may look stuck at a percentage - that is normal.' -Color Green
+    Write-Log 'Running DISM RestoreHealth (scans and repairs). This can take 10-30 minutes and may look stuck at a percentage - that is normal.' -Color Green
     $repairSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth') -Phase 'DISM RestoreHealth' -StallWarnMinutes $config.StallWarnMinutes
-    Write-Log ('DISM RestoreHealth finished with exit code ' + $dismRepairExit)
-    $sourceWim = ''
-    if ($null -ne $dismRepairExit -and $dismRepairExit -ne 0) {
-        $sourceWim = Get-DismLocalSource -ManualSource $Source
-        if ($sourceWim) {
-            Write-Log ('Windows Update source failed; retrying with local source: ' + $sourceWim) -Color Yellow
-            $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth', ('/Source:' + $sourceWim), '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
-            Write-Log ('DISM RestoreHealth (local source) finished with exit code ' + $dismRepairExit)
+    $localSource = Get-DismLocalSource -ManualSource $Source
+    $dismRepairExit = $null
+    $restoreDetail = 'exit ' + $dismRepairExit
+    if ($config.SafeRestoreOnly) {
+        if (-not $localSource) {
+            $repairSw.Stop()
+            $hadError = $true
+            $restoreDetail = 'skipped (SafeRestoreOnly, no local source)'
+            Write-Log 'SafeRestoreOnly is enabled: DISM RestoreHealth may only use a local source, but no install.wim/install.esd was found. Pass -Source or mount a Windows ISO. Skipping - nothing was downloaded from Windows Update.' -Color Yellow
+        }
+        else {
+            Write-Log ('SafeRestoreOnly is enabled: restoring from local source only (no Windows Update): ' + $localSource) -Color Yellow
+            $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth', ('/Source:' + $localSource), '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
+        }
+    }
+    else {
+        Write-Log 'Using Windows Update as the repair source. This requires an internet connection.' -Color Green
+        $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth') -Phase 'DISM RestoreHealth' -StallWarnMinutes $config.StallWarnMinutes
+        if ($null -ne $dismRepairExit -and $dismRepairExit -ne 0) {
+            if ($localSource) {
+                Write-Log ('Windows Update source failed; retrying with local source: ' + $localSource) -Color Yellow
+                $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth', ('/Source:' + $localSource), '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
+            }
         }
     }
     $repairSw.Stop()
+    if ($null -ne $dismRepairExit) {
+        Write-Log ('DISM RestoreHealth finished with exit code ' + $dismRepairExit)
+    }
     if ($null -ne $dismRepairExit -and $dismRepairExit -ne 0) {
         $hadError = $true
-        if (-not $sourceWim) {
+        if (-not $localSource) {
             Write-Log 'DISM reported an error and no local Windows ISO source was found (install.wim/install.esd). Mount a matching Windows ISO or run in Safe Mode with Networking, then try again.' -Color Yellow
         }
         else {
@@ -472,7 +490,7 @@ if ($config.RunDismRestore -and -not $ReportOnly) {
         }
         Add-LogTail -Path "$env:SystemRoot\Logs\DISM\dism.log" -Label 'DISM log'
     }
-    Add-PhaseResult -Name 'DISM RestoreHealth' -Detail ('exit ' + $dismRepairExit) -Seconds $repairSw.Elapsed.TotalSeconds
+    Add-PhaseResult -Name 'DISM RestoreHealth' -Detail $restoreDetail -Seconds $repairSw.Elapsed.TotalSeconds
 }
 else {
     $dismRepairExit = $null
@@ -649,26 +667,31 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
     Show-Progress 'Windows Update cache'
     Write-Log 'Freeing Windows Update download cache...' -Color Green
     $wuSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $wuServices = @('wuauserv', 'bits')
+    $wuServices = @('wuauserv', 'dosvc', 'bits')
     $stopped = @()
     $alreadyStopped = @()
     $wasRunning = @{}
     foreach ($svc in $wuServices) {
+        $svcObj = Get-Service -Name $svc -ErrorAction SilentlyContinue
+        if ($null -eq $svcObj) {
+            $wasRunning[$svc] = $false
+            Write-Log ('Service ' + $svc + ' not present on this system.')
+            continue
+        }
+        $wasRunning[$svc] = ($svcObj.Status -eq 'Running')
+    }
+    foreach ($svc in $wuServices) {
+        if (-not $wasRunning[$svc]) {
+            $alreadyStopped += $svc
+            Write-Log ('Service ' + $svc + ' was already stopped - leaving it as-is.')
+            continue
+        }
         try {
-            $svcState = (Get-Service -Name $svc -ErrorAction Stop).Status
-            $wasRunning[$svc] = ($svcState -eq 'Running')
-            if ($svcState -eq 'Running') {
-                Stop-Service -Name $svc -Force -ErrorAction Stop
-                $stopped += $svc
-                Write-Log ('Stopped service ' + $svc)
-            }
-            else {
-                $alreadyStopped += $svc
-                Write-Log ('Service ' + $svc + ' was already stopped - leaving it as-is.')
-            }
+            Stop-Service -Name $svc -Force -ErrorAction Stop
+            $stopped += $svc
+            Write-Log ('Stopped service ' + $svc)
         }
         catch {
-            $wasRunning[$svc] = $false
             Write-Log ('Could not stop service ' + $svc + ': ' + $_.Exception.Message) -Color Yellow
         }
     }
@@ -676,7 +699,10 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
     if ($stopped.Count + $alreadyStopped.Count -eq $wuServices.Count) {
         $wuCache = "$env:SystemRoot\SoftwareDistribution\Download"
         $wuSize = Get-DirSizeBytes -Path $wuCache
-        Get-ChildItem -LiteralPath $wuCache -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        try {
+            Get-ChildItem -LiteralPath $wuCache -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction Stop
+        }
+        catch { }
         $wuFreed = (($wuSize - (Get-DirSizeBytes -Path $wuCache)) / 1MB)
         Write-Log ('Windows Update cache cleared (~{0:N1} MB freed)' -f [Math]::Max(0, $wuFreed))
     }
@@ -685,7 +711,12 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
     }
     foreach ($svc in $wuServices) {
         if ($wasRunning[$svc]) {
-            Start-Service -Name $svc -ErrorAction SilentlyContinue
+            try {
+                Start-Service -Name $svc -ErrorAction Stop
+            }
+            catch {
+                Write-Log ('Could not restart service ' + $svc + ': ' + $_.Exception.Message) -Color Yellow
+            }
         }
     }
     Write-Log 'Windows Update services restored to their previous state.'
@@ -709,13 +740,19 @@ if ($config.RunTempCleanup -and -not $ReportOnly) {
     if ($config.CleanCurrentUserTemp) { $tempTargets += $env:TEMP }
     if ($config.CleanSystemTemp) { $tempTargets += "$env:SystemRoot\Temp" }
     if ($config.CleanAllUsersTemp) {
-        $usersRoot = Split-Path $env:USERPROFILE -Parent
-        if (Test-Path -LiteralPath $usersRoot) {
-            foreach ($userDir in (Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue)) {
-                $t = Join-Path $userDir.FullName 'AppData\Local\Temp'
-                if (Test-Path -LiteralPath $t) { $tempTargets += $t }
+        try {
+            $usersRoot = Split-Path $env:USERPROFILE -Parent
+            if (Test-Path -LiteralPath $usersRoot) {
+                foreach ($userDir in (Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue)) {
+                    try {
+                        $t = Join-Path $userDir.FullName 'AppData\Local\Temp'
+                        if (Test-Path -LiteralPath $t) { $tempTargets += $t }
+                    }
+                    catch { }
+                }
             }
         }
+        catch { }
     }
     $totalFreed = [double]0
     $skipPaths = @($LogFile, $ScriptDir)
@@ -733,7 +770,10 @@ if ($config.RunTempCleanup -and -not $ReportOnly) {
                 }
             }
             if ($isProtected) { continue }
-            Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            }
+            catch { }
         }
         $freed = (($size - (Get-DirSizeBytes -Path $target)) / 1MB)
         $totalFreed += $freed
