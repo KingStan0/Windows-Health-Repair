@@ -15,6 +15,7 @@ BeforeAll {
 
     . ([scriptblock]::Create((Get-DefinedFunction 'Format-Duration').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-DismLocalSource').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Get-SfcCbsResult').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Build-RelaunchArgs').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Coerce-ConfigValue').Extent.Text))
 }
@@ -120,9 +121,40 @@ Describe 'Coerce-ConfigValue' {
         Coerce-ConfigValue -DefaultValue $true -LoadedValue '0' | Should -Be $false
     }
 
-    It 'passes through JSON booleans and other types unchanged' {
+It 'passes through JSON booleans and other types unchanged' {
         Coerce-ConfigValue -DefaultValue $true -LoadedValue $false | Should -Be $false
         Coerce-ConfigValue -DefaultValue 10 -LoadedValue '10' | Should -Be '10'
+    }
+}
+
+Describe 'Get-SfcCbsResult' {
+    BeforeAll {
+        $cutoff = [datetime]'2026-08-14 12:00:00'
+        $Cbs = Join-Path $TestDrive 'CBS.log'
+        $before = '2026-08-14 11:00:00, Info                  [SR] Repairing 3 components'
+        $afterRepair = '2026-08-14 13:00:00, Info                  [SR] Repairing 5 components'
+        $afterDone = '2026-08-14 13:00:05, Info                  [SR] Repaired 2 files'
+        $noMatch = '2026-08-14 14:00:00, Info                  some unrelated entry'
+        Set-Content -LiteralPath $Cbs -Value @($before, $afterRepair, $afterDone, $noMatch) -Encoding UTF8
+    }
+
+    It 'only counts [SR] markers timestamped after the run start' {
+        $r = Get-SfcCbsResult -Since $cutoff -CbsPath $Cbs
+        $r.RepairingTotal | Should -Be 5
+        $r.RepairedFiles | Should -Be 1
+    }
+
+    It 'counts nothing for a cutoff later than all entries' {
+        $r = Get-SfcCbsResult -Since ([datetime]'2026-08-14 15:00:00') -CbsPath $Cbs
+        $r.RepairingTotal | Should -Be 0
+        $r.RepairedFiles | Should -Be 0
+    }
+
+    It 'falls back to the full tail when timestamps cannot be parsed' {
+        $CbsNoTs = Join-Path $TestDrive 'CBS_nots.log'
+        Set-Content -LiteralPath $CbsNoTs -Value @('no timestamp line [SR] Repairing 7 components') -Encoding UTF8
+        $r = Get-SfcCbsResult -Since $cutoff -CbsPath $CbsNoTs
+        $r.RepairingTotal | Should -Be 7
     }
 }
 

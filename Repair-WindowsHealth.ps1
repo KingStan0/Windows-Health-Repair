@@ -245,10 +245,27 @@ function Get-DirSizeBytes {
 }
 
 function Get-SfcCbsResult {
+    param(
+        [datetime]$Since,
+        [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
+    )
     $result = @{ RepairingTotal = 0; RepairedFiles = 0 }
-    $cbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
-    if (-not (Test-Path -LiteralPath $cbsPath)) { return $result }
-    $lines = Get-Content -LiteralPath $cbsPath -Tail 3000
+    if (-not (Test-Path -LiteralPath $CbsPath)) { return $result }
+    $lines = @(Get-Content -LiteralPath $CbsPath -Tail 3000)
+    if ($null -ne $Since) {
+        $parsed = @($lines | ForEach-Object {
+            $m = [regex]::Match($_, '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')
+            if ($m.Success) {
+                $ts = [datetime]::MinValue
+                if ([datetime]::TryParseExact($m.Value, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$ts)) {
+                    [pscustomobject]@{ Ts = $ts; Text = $_ }
+                }
+            }
+        } | Where-Object { $null -ne $_ })
+        if ($parsed.Count -gt 0) {
+            $lines = @($parsed | Where-Object { $_.Ts -ge $Since } | ForEach-Object { $_.Text })
+        }
+    }
     $repairing = $lines | Select-String -Pattern '\[SR\] Repairing (\d+) components' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value }
     if ($repairing) { $result.RepairingTotal = ($repairing | Measure-Object -Sum).Sum }
     $result.RepairedFiles = ($lines | Select-String -Pattern '\[SR\] Repaired ').Count
@@ -413,7 +430,7 @@ if ($config.RunSfc) {
     Write-Log ('SFC finished with exit code ' + $sfcExit)
     $sfcSw.Stop()
 
-    $cbsResult = Get-SfcCbsResult
+    $cbsResult = Get-SfcCbsResult -Since $totalRunStart
     if ($cbsResult.RepairingTotal -eq 0 -and $cbsResult.RepairedFiles -eq 0) {
         $sfcResultText = 'Healthy'
         Write-Log 'SFC result: verified via CBS.log - no components needed repair. System files are healthy.' -Color Green
