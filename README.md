@@ -29,7 +29,7 @@ No registry tweaks, no third-party tools, no "optimizer" magic. Only built-in Wi
 - **Exit codes** - `0` all healthy, `1` repairs applied / restart recommended, `2` one or more phases errored (scriptable)
 - **Completion popup** - a summary dialog at the end (can be disabled via config; always suppressed in scheduled runs)
 - **Configurable** - every phase and cleanup target can be toggled via `WindowsHealthRepair.json` (no code edits needed)
-- **Safe** - temp-only cleanup, Windows Update services stopped/restarted properly, reboot prompt only when repairs actually require it. Your files are never touched: the recycle bin is only emptied if you pass `-EmptyRecycleBin`
+- **Safe** - temp-only cleanup, Windows Update services paused only when running and restored to their prior state, reboot prompt only when repairs actually require it. Your files are never touched: the recycle bin is only emptied if you pass `-EmptyRecycleBin`
 - **Diagnostic guidance** - on DISM failures, points to Safe Mode / Windows ISO source next steps and logs the relevant log tails
 
 ## Requirements
@@ -112,7 +112,7 @@ This tool is designed to stay clear of antivirus heuristics:
 
 - **No `-ExecutionPolicy Bypass`** - the launcher uses `RemoteSigned` and automatically removes the Mark-of-the-Web (`Unblock-File`) from the script, so downloaded copies run normally instead of looking like a bypass dropper
 - **No obfuscation** - no encoded commands, no `Invoke-Expression`, no string tricks; the script is plain, readable PowerShell
-- **No registry tweaks, no services disabled, no persistence** - it stops `wuauserv`/`bits` briefly to clear the update cache and restarts them immediately (logged)
+- **No registry tweaks, no services disabled, no persistence** - it pauses `wuauserv`/`bits` only if they were running, clears the update cache, and restores them to their previous state (a service you had disabled stays disabled)
 - **Everything is auditable** - every action is written to the log
 
 If Windows Defender still flags it (heuristic detection of unknown, unsigned scripts is possible):

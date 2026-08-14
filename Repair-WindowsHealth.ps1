@@ -15,18 +15,18 @@ function Build-RelaunchArgs {
         [Parameter(Mandatory)][hashtable]$BoundParameters,
         [Parameter(Mandatory)][string]$CommandPath
     )
-    $args = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"{0}"' -f $CommandPath))
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"{0}"' -f $CommandPath))
     foreach ($key in $BoundParameters.Keys) {
         $value = $BoundParameters[$key]
         if ($value -is [switch] -or $value -is [bool]) {
-            if ($value) { $args += '-' + $key }
+            if ($value) { $argList += '-' + $key }
         }
         else {
-            $args += '-' + $key
-            $args += ('"{0}"' -f ([string]$value))
+            $argList += '-' + $key
+            $argList += ('"{0}"' -f ([string]$value))
         }
     }
-    return $args
+    return $argList
 }
 
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -189,26 +189,13 @@ function Invoke-NativeTool {
         [Parameter(Mandatory)][string]$FilePath,
         [Parameter(Mandatory)][string[]]$ArgumentList,
         [Parameter(Mandatory)][string]$Phase,
-        [int]$StallWarnMinutes = 10,
-        [string]$OutputFile = ''
+        [int]$StallWarnMinutes = 10
     )
-    $useRedirect = [bool]$OutputFile
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
     $psi.Arguments = (($ArgumentList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' ')
     $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $useRedirect
-    if ($useRedirect) {
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-    }
     $proc = [System.Diagnostics.Process]::Start($psi)
-    $outTask = $null
-    $errTask = $null
-    if ($useRedirect) {
-        $outTask = $proc.StandardOutput.ReadToEndAsync()
-        $errTask = $proc.StandardError.ReadToEndAsync()
-    }
     $lastCpu = $null
     $stallSeconds = 0
     $warned = $false
@@ -235,10 +222,6 @@ function Invoke-NativeTool {
             $lastCpu = $cpu
             $stallSeconds = 0
         }
-    }
-    if ($useRedirect -and $null -ne $outTask) {
-        try { [System.IO.File]::WriteAllText($OutputFile, $outTask.Result) } catch { }
-        try { [System.IO.File]::WriteAllText($OutputFile + '.err', $errTask.Result) } catch { }
     }
     $exitCode = if ($null -ne $proc.ExitCode) { $proc.ExitCode } else { -1 }
     return $exitCode
@@ -426,7 +409,6 @@ if ($config.RunSfc) {
         Write-Log 'Running sfc /scannow. This usually takes 10-20 minutes.' -Color Green
     }
     $sfcSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $sfcExit = -1
     $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList $sfcArgs -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes
     Write-Log ('SFC finished with exit code ' + $sfcExit)
     $sfcSw.Stop()
@@ -503,18 +485,29 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
     $wuSw = [System.Diagnostics.Stopwatch]::StartNew()
     $wuServices = @('wuauserv', 'bits')
     $stopped = @()
+    $alreadyStopped = @()
+    $wasRunning = @{}
     foreach ($svc in $wuServices) {
         try {
-            Stop-Service -Name $svc -Force -ErrorAction Stop
-            $stopped += $svc
-            Write-Log ('Stopped service ' + $svc)
+            $svcState = (Get-Service -Name $svc -ErrorAction Stop).Status
+            $wasRunning[$svc] = ($svcState -eq 'Running')
+            if ($svcState -eq 'Running') {
+                Stop-Service -Name $svc -Force -ErrorAction Stop
+                $stopped += $svc
+                Write-Log ('Stopped service ' + $svc)
+            }
+            else {
+                $alreadyStopped += $svc
+                Write-Log ('Service ' + $svc + ' was already stopped - leaving it as-is.')
+            }
         }
         catch {
+            $wasRunning[$svc] = $false
             Write-Log ('Could not stop service ' + $svc + ': ' + $_.Exception.Message) -Color Yellow
         }
     }
     $wuFreed = 0
-    if ($stopped.Count -eq $wuServices.Count) {
+    if ($stopped.Count + $alreadyStopped.Count -eq $wuServices.Count) {
         $wuCache = "$env:SystemRoot\SoftwareDistribution\Download"
         $wuSize = Get-DirSizeBytes -Path $wuCache
         Get-ChildItem -LiteralPath $wuCache -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -522,12 +515,14 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
         Write-Log ('Windows Update cache cleared (~{0:N1} MB freed)' -f [Math]::Max(0, $wuFreed))
     }
     else {
-        Write-Log 'Skipping Windows Update cache (a service could not be stopped; cache may be in use).' -Color Yellow
+        Write-Log 'Skipping Windows Update cache (a service is still running; cache may be in use).' -Color Yellow
     }
     foreach ($svc in $wuServices) {
-        Start-Service -Name $svc -ErrorAction SilentlyContinue
+        if ($wasRunning[$svc]) {
+            Start-Service -Name $svc -ErrorAction SilentlyContinue
+        }
     }
-    Write-Log 'Windows Update services restarted.'
+    Write-Log 'Windows Update services restored to their previous state.'
     $wuSw.Stop()
     Add-PhaseResult -Name 'Windows Update cache' -Detail ('{0:N1} MB freed' -f [Math]::Max(0, $wuFreed)) -Seconds $wuSw.Elapsed.TotalSeconds
 }
@@ -561,7 +556,6 @@ if ($config.RunTempCleanup -and -not $ReportOnly) {
     $skipPaths = @($skipPaths | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') })
     foreach ($target in ($tempTargets | Select-Object -Unique)) {
         $size = Get-DirSizeBytes -Path $target
-        $targetFull = [System.IO.Path]::GetFullPath($target).TrimEnd('\')
         $items = @(Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue)
         foreach ($item in $items) {
             $itemFull = $item.FullName.TrimEnd('\')
