@@ -21,6 +21,7 @@ BeforeAll {
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-ChkdskExitText').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-UnrepairableSfcFiles').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-PendingReboot').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Test-ProtectedPath').Extent.Text))
 }
 
 Describe 'Script file sanity' {
@@ -81,7 +82,7 @@ Describe 'Script file sanity' {
         $enum = [regex]::Match($body, '(?s)if \(\$config\.CleanAllUsersTemp\).*?Get-ChildItem -LiteralPath \$usersRoot -Directory')
         $enum.Success | Should -Be $true
         $enum.Value | Should -Match 'try \{'
-        $del = [regex]::Match($body, '(?s)Remove-Item -LiteralPath \$item\.FullName.*?catch')
+        $del = [regex]::Match($body, '(?s)Remove-TreeFast -Path \$item\.FullName.*?catch')
         $del.Success | Should -Be $true
     }
 
@@ -244,6 +245,28 @@ Describe 'Get-ChkdskExitText' {
         Get-ChkdskExitText -ExitCode 2 | Should -Be 'Disk cleanup performed or not run'
         Get-ChkdskExitText -ExitCode 3 | Should -Be 'Could not check the disk'
         Get-ChkdskExitText -ExitCode 99 | Should -Be 'Unknown result'
+    }
+}
+
+Describe 'Test-ProtectedPath' {
+    It 'protects an item that equals a skip path' {
+        Test-ProtectedPath -ItemPath 'C:\x\script.ps1' -SkipPaths @('C:\x\script.ps1') | Should -Be $true
+    }
+
+    It 'protects an ancestor of a skip path' {
+        Test-ProtectedPath -ItemPath 'C:\x' -SkipPaths @('C:\x\y\z') | Should -Be $true
+    }
+
+    It 'protects an item inside a skip path (script run from inside a temp target)' {
+        Test-ProtectedPath -ItemPath 'C:\x\script.ps1' -SkipPaths @('C:\x') | Should -Be $true
+    }
+
+    It 'does not protect unrelated items' {
+        Test-ProtectedPath -ItemPath 'C:\other' -SkipPaths @('C:\x') | Should -Be $false
+    }
+
+    It 'is case-insensitive' {
+        Test-ProtectedPath -ItemPath 'c:\X\script.ps1' -SkipPaths @('C:\x') | Should -Be $true
     }
 }
 

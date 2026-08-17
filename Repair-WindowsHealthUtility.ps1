@@ -72,6 +72,7 @@ $config = @{
     CleanSystemTemp        = $true
     TcpCheckTimeoutSeconds = 5
     ShowCompletionPopup    = $true
+    UseHighPriority        = $true
 }
 
 function Coerce-ConfigValue {
@@ -98,6 +99,10 @@ if (Test-Path -LiteralPath $ConfigPath) {
     catch {
         $configSource = 'built-in defaults (config file unreadable)'
     }
+}
+
+if ($config.UseHighPriority) {
+    try { (Get-Process -Id $PID).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High } catch { }
 }
 
 $ScheduledTaskName = 'Windows Health Repair Utility'
@@ -169,13 +174,21 @@ function Show-Progress {
     $barLen = 20
     $filled = [Math]::Floor($barLen * $script:stepPos / $script:totalSteps)
     $bar = ('#' * $filled).PadRight($barLen, '-')
-    Write-Host ('[{0}] {1,3}% {2}' -f $bar, $pct, $Label)
-    try { $Host.UI.RawUI.WindowTitle = '{0}% - {1} - Windows Health Repair Utility' -f $pct, $Label } catch { }
+    $elapsedM = [Math]::Floor(((Get-Date) - $totalRunStart).TotalMinutes)
+    Write-Host ('[{0}] {1,3}% {2}  (step {3}/{4}, {5}m elapsed)' -f $bar, $pct, $Label, $script:stepPos, $script:totalSteps, $elapsedM)
+    try { $Host.UI.RawUI.WindowTitle = '{0}% - {1} - Windows Health Repair Utility ({2}m)' -f $pct, $Label, $elapsedM } catch { }
 }
 
 function Add-PhaseResult {
     param([string]$Name, [string]$Detail, [double]$Seconds)
     [void]$script:results.Add([pscustomobject]@{ Name = $Name; Detail = $Detail; Seconds = $Seconds })
+    $isWarn = ($Detail -match 'exit [^0]') -or ($Detail -match 'skipped') -or ($Detail -match 'failed')
+    if ($isWarn) {
+        Write-Log ('  [WARN] {0} - {1} ({2})' -f $Name, $Detail, (Format-Duration $Seconds)) -Color Yellow
+    }
+    else {
+        Write-Log ('  [OK]   {0} - {1} ({2})' -f $Name, $Detail, (Format-Duration $Seconds)) -Color Green
+    }
 }
 
 function Format-Duration {
@@ -201,9 +214,14 @@ function Invoke-NativeTool {
     $psi.Arguments = (($ArgumentList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' ')
     $psi.UseShellExecute = $false
     $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($config.UseHighPriority) {
+        try { $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High } catch { }
+    }
     $lastCpu = $null
     $stallSeconds = 0
     $warned = $false
+    $hardWarned = $false
+    $gentleWarnSeconds = [Math]::Min(300, ($StallWarnMinutes * 60))
     while (-not $proc.WaitForExit(15000)) {
         try {
             $cpu = $proc.TotalProcessorTime.TotalSeconds
@@ -218,9 +236,14 @@ function Invoke-NativeTool {
         }
         elseif ($cpu -eq $lastCpu) {
             $stallSeconds += 15
-            if (-not $warned -and $stallSeconds -ge ($StallWarnMinutes * 60)) {
-                Write-Log ('WARNING: {0} shows no CPU activity for {1} minutes. Long pauses are often normal during downloads. Do not kill it - let it finish.' -f $Phase, $StallWarnMinutes) -Color Yellow
+            if (-not $warned -and $stallSeconds -ge $gentleWarnSeconds) {
+                $gentleM = [Math]::Floor($stallSeconds / 60)
+                Write-Log ('NOTE: {0} shows no activity for {1} minute(s). This is often normal while it downloads or processes files. Do not close this window - let it finish.' -f $Phase, $gentleM) -Color Yellow
                 $warned = $true
+            }
+            elseif ($warned -and -not $hardWarned -and $stallSeconds -ge ($StallWarnMinutes * 60)) {
+                Write-Log ('WARNING: {0} has had no CPU activity for {1} minutes - longer than usual. Long pauses are normally fine, but keep an eye on it. Still do not kill it - let it finish.' -f $Phase, $StallWarnMinutes) -Color Red
+                $hardWarned = $true
             }
         }
         else {
@@ -249,6 +272,33 @@ function Get-DirSizeBytes {
     $sum = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     if ($null -eq $sum) { return [long]0 }
     return $sum
+}
+
+function Remove-TreeFast {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return }
+    if (-not $item.PSIsContainer) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        return
+    }
+    try {
+        & cmd.exe /c ('rmdir /s /q "' + $Path + '"') 2>$null | Out-Null
+    }
+    catch { }
+}
+
+function Test-ProtectedPath {
+    param([string]$ItemPath, [string[]]$SkipPaths)
+    foreach ($skip in $SkipPaths) {
+        if ($skip -eq $ItemPath -or
+            $skip.StartsWith($ItemPath + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
+            $ItemPath.StartsWith($skip + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-SfcCbsResult {
@@ -337,23 +387,38 @@ function Get-ChkdskExitText {
 }
 
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
-$driveName = $env:SystemDrive.TrimEnd(':')
+$driveName = ($env:SystemDrive -replace ':$', '')
 $freeBefore = (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue).Free
 $restartRecommended = $false
 $hadError = $false
 $sfcResultText = 'See log'
 $totalRunStart = Get-Date
 
+$installText = ''
+if ($null -ne $os.InstallDate) {
+    $installAge = [Math]::Floor(((Get-Date) - $os.InstallDate).TotalDays)
+    $installText = $os.InstallDate.ToString('yyyy-MM-dd') + ' (' + $installAge + ' days ago)'
+}
+
 Write-Log '====================================================================' -Color Cyan
-Write-Log '  WINDOWS HEALTH REPAIR UTILITY' -Color Cyan
+Write-Log '  WINDOWS HEALTH REPAIR UTILITY BY KINGSTAN' -Color Cyan
 Write-Log '====================================================================' -Color Cyan
 Write-Log ('  Started : ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Write-Log ('  System  : ' + $os.Caption + ' (' + $os.Version + ')')
 Write-Log ('  Machine : ' + $env:COMPUTERNAME)
 Write-Log ('  Shell   : PowerShell ' + $PSVersionTable.PSVersion.ToString())
 Write-Log ('  Config  : ' + $configSource)
+if ($installText) { Write-Log ('  Installed : ' + $installText) }
 Write-Log ('  Log     : ' + $LogFile)
 Write-Log '====================================================================' -Color Cyan
+Write-Log ''
+Write-Log 'What this tool does: repairs the Windows component store (DISM),' -Color Magenta
+Write-Log 'protected system files (SFC), then safely cleans up disk space.' -Color Magenta
+Write-Log 'Total time: usually 10-30 minutes. Watch the progress below -' -Color Magenta
+Write-Log 'do not close this window until it finishes.' -Color Magenta
+if ($config.UseHighPriority) {
+    Write-Log 'Running at High CPU priority - the machine may feel slower while it works.' -Color Magenta
+}
 Write-Log ''
 
 Show-Progress 'Pre-flight'
@@ -363,14 +428,6 @@ try {
     $uptime = (Get-Date) - (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
     if ($uptime -gt [TimeSpan]::Zero) {
         Write-Log ('  Uptime : ' + '{0}d {1}h {2}m' -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
-    }
-}
-catch { }
-try {
-    $installDate = (Get-CimInstance -ClassName Win32_OperatingSystem).InstallDate
-    if ($null -ne $installDate) {
-        $installAge = [Math]::Floor(((Get-Date) - $installDate).TotalDays)
-        Write-Log ('  Installed : ' + $installDate.ToString('yyyy-MM-dd') + ' (' + $installAge + ' days ago)')
     }
 }
 catch { }
@@ -428,9 +485,8 @@ $osVersion = [System.Environment]::OSVersion.Version
 if ($osVersion.Major -lt 10) {
     Write-Log 'WARNING: This script targets Windows 10/11. Some commands may behave differently on this version.' -Color Yellow
 }
-$diskFreeGb = $freeBefore / 1GB
-if ($null -ne $diskFreeGb -and $diskFreeGb -lt 5) {
-    Write-Log ('WARNING: Only {0:N1} GB free on the system drive. DISM RestoreHealth may need about 5 GB to download repair files.' -f $diskFreeGb) -Color Yellow
+if ($null -ne $freeBefore -and (($freeBefore / 1GB) -lt 5)) {
+    Write-Log ('WARNING: Only {0:N1} GB free on the system drive. DISM RestoreHealth may need about 5 GB to download repair files.' -f ($freeBefore / 1GB)) -Color Yellow
 }
 if ($ReportOnly) {
     Write-Log 'REPORT-ONLY mode: no repairs or cleanup will be performed.' -Color Yellow
@@ -442,8 +498,9 @@ Write-Log 'PHASE 1: Repairing the Windows component store (DISM)' -Color Cyan
 Write-Log '====================================================================' -Color Cyan
 
 if ($config.RunDismScan) {
-    Show-Progress 'DISM ScanHealth'
-    Write-Log 'Running DISM ScanHealth (deep scan, no repair) ...' -Color Green
+    if ($ReportOnly) { Show-Progress 'DISM ScanHealth (report)' } else { Show-Progress 'DISM ScanHealth' }
+    Write-Log 'Running DISM ScanHealth - deep scan of the component store (no repairs).' -Color Green
+    Write-Log 'Usually takes 1-10 minutes. It prints its own progress - a pause at one percentage is normal. Do not close this window.'
     $scanSw = [System.Diagnostics.Stopwatch]::StartNew()
     $dismScanExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/ScanHealth') -Phase 'DISM ScanHealth' -StallWarnMinutes $config.StallWarnMinutes
     $scanSw.Stop()
@@ -458,7 +515,8 @@ else {
 
 if ($config.RunDismRestore -and -not $ReportOnly) {
     Show-Progress 'DISM RestoreHealth'
-    Write-Log 'Running DISM RestoreHealth (scans and repairs). This can take 10-30 minutes and may look stuck at a percentage - that is normal.' -Color Green
+    Write-Log 'Running DISM RestoreHealth - repairs the component store (SFC copies files from here).' -Color Green
+    Write-Log 'This is the longest step: 10-30 minutes. It may pause at the same percentage while downloading repair files - that is normal. Do not close this window.'
     $repairSw = [System.Diagnostics.Stopwatch]::StartNew()
     $localSource = Get-DismLocalSource -ManualSource $Source
     $dismRepairExit = $null
@@ -525,7 +583,8 @@ if ($config.RunSfc) {
         Write-Log 'Running sfc /verifyonly (report-only mode: verification, no repair). This can take 10-20 minutes.' -Color Green
     }
     else {
-        Write-Log 'Running sfc /scannow. This usually takes 10-20 minutes.' -Color Green
+        Write-Log 'Running sfc /scannow - verifies and repairs protected system files.' -Color Green
+        Write-Log 'Usually takes 10-20 minutes. It prints its own verification progress below. Do not close this window.'
     }
     $sfcSw = [System.Diagnostics.Stopwatch]::StartNew()
     $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList $sfcArgs -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes
@@ -601,7 +660,8 @@ else {
 
 if ($config.RunChkdsk -and $CheckDisk -and -not $ReportOnly) {
     Show-Progress 'Disk check'
-    Write-Log 'Checking the file system with chkdsk (online /scan, no reboot required)...' -Color Green
+    Write-Log 'Running chkdsk /scan - online file-system check (no reboot needed).' -Color Green
+    Write-Log 'Usually under 10 minutes. It prints its own progress. Do not close this window.'
     try {
         $dirtyOut = @(& fsutil.exe dirty query "$env:SystemDrive\" 2>$null)
         $dirtyText = $dirtyOut -join ' '
@@ -650,14 +710,14 @@ Write-Log '===================================================================='
 
 if ($config.RunComponentCleanup -and -not $ReportOnly) {
     Show-Progress 'Component cleanup'
-    Write-Log 'Analyzing the component store (AnalyzeComponentStore) to report reclaimable space...' -Color Green
+    Write-Log 'Analyzing the component store (AnalyzeComponentStore) to report reclaimable space - usually under a minute.' -Color Green
     $analyzeSw = [System.Diagnostics.Stopwatch]::StartNew()
     $analyzeExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/AnalyzeComponentStore') -Phase 'AnalyzeComponentStore' -StallWarnMinutes $config.StallWarnMinutes
     $analyzeSw.Stop()
     Write-Log ('AnalyzeComponentStore finished with exit code ' + $analyzeExit)
     if ($null -ne $analyzeExit -and $analyzeExit -ne 0) { $hadError = $true }
     Add-PhaseResult -Name 'Component analysis' -Detail ('exit ' + $analyzeExit) -Seconds $analyzeSw.Elapsed.TotalSeconds
-    Write-Log 'Cleaning up superseded components in the component store (StartComponentCleanup)...' -Color Green
+    Write-Log 'Cleaning up superseded components (StartComponentCleanup) - usually a few minutes. It prints its own progress. Do not close this window.' -Color Green
     $cleanupSw = [System.Diagnostics.Stopwatch]::StartNew()
     $cleanupExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/StartComponentCleanup') -Phase 'StartComponentCleanup' -StallWarnMinutes $config.StallWarnMinutes
     $cleanupSw.Stop()
@@ -710,10 +770,7 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
     if ($stopped.Count + $alreadyStopped.Count -eq $wuServices.Count) {
         $wuCache = "$env:SystemRoot\SoftwareDistribution\Download"
         $wuSize = Get-DirSizeBytes -Path $wuCache
-        try {
-            Get-ChildItem -LiteralPath $wuCache -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction Stop
-        }
-        catch { }
+        Remove-TreeFast -Path $wuCache
         $wuFreed = (($wuSize - (Get-DirSizeBytes -Path $wuCache)) / 1MB)
         Write-Log ('Windows Update cache cleared (~{0:N1} MB freed)' -f [Math]::Max(0, $wuFreed))
     }
@@ -773,16 +830,9 @@ if ($config.RunTempCleanup -and -not $ReportOnly) {
         $items = @(Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue)
         foreach ($item in $items) {
             $itemFull = $item.FullName.TrimEnd('\')
-            $isProtected = $false
-            foreach ($skip in $skipPaths) {
-                if ($skip -eq $itemFull -or $skip.StartsWith($itemFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $isProtected = $true
-                    break
-                }
-            }
-            if ($isProtected) { continue }
+            if (Test-ProtectedPath -ItemPath $itemFull -SkipPaths $skipPaths) { continue }
             try {
-                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+                Remove-TreeFast -Path $item.FullName
             }
             catch { }
         }

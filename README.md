@@ -42,6 +42,7 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 | `LogRetentionCount`, `CleanupOldLogs` | `10` / `true` | Keep the last N logs |
 | `TcpCheckTimeoutSeconds` | `5` | Internet pre-check timeout |
 | `ShowCompletionPopup` | `true` | Summary dialog at the end (always suppressed with `-ScheduledRun`) |
+| `UseHighPriority` | `true` | Run the tool and all repair tools at High CPU priority; cleanup uses fast native deletion |
 
 ## Exit codes
 
