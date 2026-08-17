@@ -18,7 +18,7 @@ jobs:
       - name: Run PSScriptAnalyzer
         shell: pwsh
         run: |
-          $results = Invoke-ScriptAnalyzer -Path 'Repair-WindowsHealth.ps1' -Severity Error -Recurse
+          $results = Invoke-ScriptAnalyzer -Path 'Repair-WindowsHealthUtility.ps1' -Severity Error -Recurse
           if ($results) {
             $results | Format-List RuleName, Severity, Message, ScriptName, Line
             throw "$($results.Count) error-severity violation(s) found."
@@ -35,10 +35,10 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'Repair-WindowsHealth.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'Repair-WindowsHealthUtility.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors -and $errors.Count -gt 0) {
             $errors | ForEach-Object { Write-Host $_.Message }
-            throw "Syntax errors found in Repair-WindowsHealth.ps1"
+            throw "Syntax errors found in Repair-WindowsHealthUtility.ps1"
           }
           Write-Host "Parse OK under PowerShell 5.1"
       - name: Install Pester 5

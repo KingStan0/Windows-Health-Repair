@@ -1,0 +1,69 @@
+﻿
+[04:00:13] ====================================================================
+[04:00:13]   WINDOWS HEALTH REPAIR
+[04:00:13] ====================================================================
+[04:00:13]   Started : 2026-08-15 04:00:13
+[04:00:13]   System  : Microsoft Windows 11 Pro (10.0.26200)
+[04:00:13]   Machine : KINGSTAN
+[04:00:13]   Shell   : PowerShell 5.1.26100.8972
+[04:00:13]   Config  : built-in defaults
+[04:00:13]   Log     : C:\Users\KingStan\Desktop\Windows Health Repair\WindowsHealthRepair_20260815_040013.log
+[04:00:13] ====================================================================
+[04:00:13] SYSTEM BASELINE:
+[04:00:13]   Uptime : 0d 11h 30m
+[04:00:13]   Memory : 11.4 GB free of 19.9 GB (57% free)
+[04:00:13]   Drive  : C 359.0 GB free of 475.9 GB
+[04:00:13]   Drive  : D 68.0 GB free of 111.8 GB
+[04:00:13]   Drive  : E 700.4 GB free of 931.5 GB
+[04:00:13]   Pending reboot : No
+[04:00:14]   System errors (last 24h) : 5
+[04:00:14] PRE-FLIGHT: Admin mode confirmed. Running DISM quick health check (CheckHealth)...
+[04:00:14] CheckHealth exit code: 0 (0 = no known corruption flag)
+[04:00:14] ====================================================================
+[04:00:14] PHASE 1: Repairing the Windows component store (DISM)
+[04:00:14] ====================================================================
+[04:00:14] Running DISM ScanHealth (deep scan, no repair) ...
+[04:01:27] DISM ScanHealth finished with exit code 0
+[04:01:27] Running DISM RestoreHealth (scans and repairs). This can take 10-30 minutes and may look stuck at a percentage - that is normal.
+[04:01:27] Using Windows Update as the repair source. This requires an internet connection.
+[04:10:38] DISM RestoreHealth finished with exit code 0
+[04:10:38] ====================================================================
+[04:10:38] PHASE 2: Repairing protected system files (SFC)
+[04:10:38] ====================================================================
+[04:10:38] Running sfc /scannow. This usually takes 10-20 minutes.
+[04:11:46] SFC finished with exit code 0
+[04:11:46] SFC result: verified via CBS.log - no components needed repair. System files are healthy.
+[04:11:46] Disk check skipped (pass -CheckDisk to enable it).
+[04:11:46] ====================================================================
+[04:11:46] PHASE 3: Disk cleanup
+[04:11:46] ====================================================================
+[04:11:46] Analyzing the component store (AnalyzeComponentStore) to report reclaimable space...
+[04:12:06] AnalyzeComponentStore finished with exit code 0
+[04:12:06] Cleaning up superseded components in the component store (StartComponentCleanup)...
+[04:12:06] StartComponentCleanup finished with exit code 0
+[04:12:06] Freeing Windows Update download cache...
+[04:12:06] Stopped service wuauserv
+[04:12:06] Stopped service dosvc
+[04:12:06] Service bits was already stopped - leaving it as-is.
+[04:12:06] Windows Update cache cleared (~16.0 MB freed)
+[04:12:07] Windows Update services restored to their previous state.
+[04:12:07] Cleaning temporary files...
+[04:12:08] Cleaned C:\Users\KingStan\AppData\Local\Temp (~0.0 MB freed)
+[04:12:08] Cleaned C:\WINDOWS\Temp (~0.0 MB freed)
+[04:12:08] Recycle Bin left untouched (run with -EmptyRecycleBin to clear it).
+[04:12:08] ====================================================================
+[04:12:08] SUMMARY
+[04:12:08] ====================================================================
+[04:12:08]   CheckHealth            exit 0                               0m 00s
+[04:12:08]   DISM ScanHealth        exit 0                               1m 12s
+[04:12:08]   DISM RestoreHealth     exit 0                               9m 11s
+[04:12:08]   SFC                    Healthy (exit 0)                     1m 07s
+[04:12:08]   Component analysis     exit 0                               0m 19s
+[04:12:08]   Component cleanup      exit 0                               0m 00s
+[04:12:08]   Windows Update cache   16.0 MB freed                        0m 01s
+[04:12:08]   Temp files             0.0 MB freed                         0m 00s
+[04:12:08]   --------------------------------------------------------------------
+[04:12:08]   Total run time                                              11m 54s
+[04:12:08]   Free disk space        359.0 GB -> 358.5 GB                
+[04:12:08]   Full log saved to   : C:\Users\KingStan\Desktop\Windows Health Repair\WindowsHealthRepair_20260815_040013.log
+[04:12:08] ====================================================================

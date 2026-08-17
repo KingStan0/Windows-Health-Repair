@@ -1,7 +1,7 @@
 #Requires -Module @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
 
 BeforeAll {
-    $ScriptPath = Join-Path $PSScriptRoot '..\Repair-WindowsHealth.ps1'
+    $ScriptPath = Join-Path $PSScriptRoot '..\Repair-WindowsHealthUtility.ps1'
     $tokens = $null
     $parseErrors = $null
     $Ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$parseErrors)
@@ -133,9 +133,9 @@ Describe 'Script file sanity' {
 
 Describe 'Build-RelaunchArgs' {
     It 'returns the base command when no parameters are bound' {
-        $args = Build-RelaunchArgs -BoundParameters @{} -CommandPath 'C:\tools\Repair-WindowsHealth.ps1'
+        $args = Build-RelaunchArgs -BoundParameters @{} -CommandPath 'C:\tools\Repair-WindowsHealthUtility.ps1'
         $args[0..3] | Should -Be @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File')
-        $args[4] | Should -Be '"C:\tools\Repair-WindowsHealth.ps1"'
+        $args[4] | Should -Be '"C:\tools\Repair-WindowsHealthUtility.ps1"'
         $args.Count | Should -Be 5
     }
 
@@ -280,7 +280,7 @@ Describe 'Get-UnrepairableSfcFiles' {
 
 Describe 'Launcher batch file' {
     It 'forwards arguments passed to the .bat to the PowerShell script' {
-        $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health.bat') -Raw
-        $bat | Should -Match '-File .*Repair-WindowsHealth\.ps1" %\*'
+        $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health Utility.bat') -Raw
+        $bat | Should -Match '-File .*Repair-WindowsHealthUtility\.ps1" %\*'
     }
 }

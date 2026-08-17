@@ -2,7 +2,7 @@
 AGENTS.md
 
 # Runtime logs
-WindowsHealthRepair_*.log
+WindowsHealthRepairUtility_*.log
 
 # Machine-local configuration (template is committed as WindowsHealthRepair.example.json)
 WindowsHealthRepair.json

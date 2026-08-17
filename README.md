@@ -1,4 +1,4 @@
-# Windows Health Repair
+# Windows Health Repair Utility (WHRU)
 
 > One click. DISM -> SFC -> cleanup, in the right order. Fully logged.
 
@@ -9,7 +9,7 @@ Repairs the Windows component store, protected system files, and runs safe disk 
 ## Quick start
 
 ```bat
-Repair Windows Health.bat
+Repair Windows Health Utility.bat
 ```
 
 Accept the UAC prompt and wait. A typical run takes 10-20 minutes. DISM may sit at a fixed percentage while it downloads - that is normal, let it finish.
@@ -53,7 +53,7 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 
 ## What it runs
 
-- **Pre-flight** - CheckHealth, system baseline (uptime, disk, memory, pending reboot), internet and disk-space checks
+- **Pre-flight** - CheckHealth, system baseline (install date, uptime, disk, memory, pending reboot), internet and disk-space checks
 - **Phase 1** - DISM ScanHealth + RestoreHealth; retries with a local ISO source if Windows Update fails
 - **Phase 2** - `sfc /scannow`, verdict verified from CBS.log, second pass if repairs were applied
 - **Phase 3** - Component-store analysis + cleanup, Windows Update cache, temp files, optional Recycle Bin
@@ -63,7 +63,7 @@ Windows Update services (`wuauserv`, `dosvc`, `bits`) are paused only while the 
 
 ## Logs
 
-- Script log: `WindowsHealthRepair_<date>.log` next to the script
+- Script log: `WindowsHealthRepairUtility_<date>.log` next to the script
 - DISM: `%SystemRoot%\Logs\DISM\dism.log` - SFC: `%SystemRoot%\Logs\CBS\CBS.log`
 
 ## Safety

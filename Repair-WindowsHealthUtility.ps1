@@ -44,13 +44,13 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $env:TEMP }
 $LogDir = $ScriptDir
-$LogFile = Join-Path $LogDir ('WindowsHealthRepair_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+$LogFile = Join-Path $LogDir ('WindowsHealthRepairUtility_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 try {
     Add-Content -Path $LogFile -Value '' -Encoding UTF8 -ErrorAction Stop
 }
 catch {
     $LogDir = $env:TEMP
-    $LogFile = Join-Path $LogDir ('WindowsHealthRepair_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $LogFile = Join-Path $LogDir ('WindowsHealthRepairUtility_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 }
 
 $config = @{
@@ -100,7 +100,7 @@ if (Test-Path -LiteralPath $ConfigPath) {
     }
 }
 
-$ScheduledTaskName = 'Windows Health Repair'
+$ScheduledTaskName = 'Windows Health Repair Utility'
 
 if ($Unschedule) {
     try {
@@ -170,7 +170,7 @@ function Show-Progress {
     $filled = [Math]::Floor($barLen * $script:stepPos / $script:totalSteps)
     $bar = ('#' * $filled).PadRight($barLen, '-')
     Write-Host ('[{0}] {1,3}% {2}' -f $bar, $pct, $Label)
-    try { $Host.UI.RawUI.WindowTitle = '{0}% - {1} - Windows Health Repair' -f $pct, $Label } catch { }
+    try { $Host.UI.RawUI.WindowTitle = '{0}% - {1} - Windows Health Repair Utility' -f $pct, $Label } catch { }
 }
 
 function Add-PhaseResult {
@@ -345,7 +345,7 @@ $sfcResultText = 'See log'
 $totalRunStart = Get-Date
 
 Write-Log '====================================================================' -Color Cyan
-Write-Log '  WINDOWS HEALTH REPAIR' -Color Cyan
+Write-Log '  WINDOWS HEALTH REPAIR UTILITY' -Color Cyan
 Write-Log '====================================================================' -Color Cyan
 Write-Log ('  Started : ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Write-Log ('  System  : ' + $os.Caption + ' (' + $os.Version + ')')
@@ -363,6 +363,14 @@ try {
     $uptime = (Get-Date) - (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
     if ($uptime -gt [TimeSpan]::Zero) {
         Write-Log ('  Uptime : ' + '{0}d {1}h {2}m' -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
+    }
+}
+catch { }
+try {
+    $installDate = (Get-CimInstance -ClassName Win32_OperatingSystem).InstallDate
+    if ($null -ne $installDate) {
+        $installAge = [Math]::Floor(((Get-Date) - $installDate).TotalDays)
+        Write-Log ('  Installed : ' + $installDate.ToString('yyyy-MM-dd') + ' (' + $installAge + ' days ago)')
     }
 }
 catch { }
@@ -842,7 +850,7 @@ Write-Log ('  Full log saved to   : ' + $LogFile)
 Write-Log '====================================================================' -Color Cyan
 
 if ($config.CleanupOldLogs -and $config.LogRetentionCount -ge 1) {
-    $oldLogs = @(Get-ChildItem -LiteralPath $LogDir -Filter 'WindowsHealthRepair_*.log' -File -ErrorAction SilentlyContinue |
+    $oldLogs = @(Get-ChildItem -LiteralPath $LogDir -Filter 'WindowsHealthRepairUtility_*.log' -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -Skip $config.LogRetentionCount)
     foreach ($l in $oldLogs) {
         Remove-Item -LiteralPath $l.FullName -Force -ErrorAction SilentlyContinue
@@ -870,9 +878,9 @@ elseif ($restartRecommended -and $ScheduledRun) {
 }
 
 if ($config.ShowCompletionPopup -and -not $ScheduledRun) {
-    $popupTitle = 'Windows Health Repair - Complete'
-    if ($hadError) { $popupTitle = 'Windows Health Repair - Finished with errors' }
-    $popupText = 'Windows Health Repair has completed.' + [Environment]::NewLine
+    $popupTitle = 'Windows Health Repair Utility - Complete'
+    if ($hadError) { $popupTitle = 'Windows Health Repair Utility - Finished with errors' }
+    $popupText = 'Windows Health Repair Utility has completed.' + [Environment]::NewLine
     $popupText += 'Full log: ' + $LogFile + [Environment]::NewLine
     if ($hadError) { $popupText += [Environment]::NewLine + 'Some phases reported errors - see the log for details.' }
     elseif ($restartRecommended) { $popupText += [Environment]::NewLine + 'A restart is recommended to finish applying repairs.' }

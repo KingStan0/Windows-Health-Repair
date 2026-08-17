@@ -16,14 +16,14 @@ jobs:
       - name: Build release zip
         shell: pwsh
         run: |
-          $files = @('Repair-WindowsHealth.ps1', 'Repair Windows Health.bat', 'README.md', 'WindowsHealthRepair.example.json', 'LICENSE')
+          $files = @('Repair-WindowsHealthUtility.ps1', 'Repair Windows Health Utility.bat', 'README.md', 'WindowsHealthRepair.example.json', 'LICENSE')
           foreach ($f in $files) {
             if (-not (Test-Path -LiteralPath $f)) { throw "Missing release file: $f" }
           }
-          Compress-Archive -Path $files -DestinationPath "WindowsHealthRepair-$($env:GITHUB_REF_NAME).zip" -Force
-          Get-Item "WindowsHealthRepair-$($env:GITHUB_REF_NAME).zip" | Select-Object Name, Length
+          Compress-Archive -Path $files -DestinationPath "WindowsHealthRepairUtility-$($env:GITHUB_REF_NAME).zip" -Force
+          Get-Item "WindowsHealthRepairUtility-$($env:GITHUB_REF_NAME).zip" | Select-Object Name, Length
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: WindowsHealthRepair-*.zip
+          files: WindowsHealthRepairUtility-*.zip
           generate_release_notes: true
