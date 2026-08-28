@@ -45,6 +45,7 @@
 .EXAMPLE
     .\Repair-WindowsHealthUtility.ps1 -ReportOnly
     .\Repair-WindowsHealthUtility.ps1 -LogPath D:\Logs -CheckDisk
+    .\Repair-WindowsHealthUtility.ps1 -LogPath "C:\Data\My.App" -JsonLog
     Repair Windows Health Utility.bat -WhatIf
 
 .NOTES
@@ -106,7 +107,7 @@ $LogDir = if ($LogPath) {
     $p = $LogPath.TrimEnd('\')
     try {
         $leaf = Split-Path $p -Leaf
-        if ($leaf -match '\.' -and -not (Test-Path -LiteralPath $p -PathType Container)) { $p = Split-Path $p -Parent }
+        if ($leaf -match '\.(log|jsonl|txt|json)$' -and -not (Test-Path -LiteralPath $p -PathType Container)) { $p = Split-Path $p -Parent }
         if ($p -and -not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force -ErrorAction Stop | Out-Null }
         if (-not $p) { $p = $ScriptDir }
         $p
@@ -123,6 +124,7 @@ catch {
 $JsonLogFile = $null
 if ($JsonLog) {
     $JsonLogFile = [System.IO.Path]::ChangeExtension($LogFile, '.jsonl')
+    try { Add-Content -Path $JsonLogFile -Value '' -Encoding UTF8 -ErrorAction Stop; Remove-Item -LiteralPath $JsonLogFile -Force -ErrorAction SilentlyContinue } catch { $JsonLogFile = $null }
 }
 
 $config = @{
@@ -953,7 +955,7 @@ if ($config.RunTempCleanup -and -not $ReportOnly) {
         catch { }
     }
     $totalFreed = [double]0
-    $skipPaths = @($LogFile, $ScriptDir)
+    $skipPaths = @($LogFile, $ScriptDir) + @($JsonLogFile | Where-Object { $_ })
     $skipPaths = @($skipPaths | ForEach-Object {
         $p = $_
         try { [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { $p.TrimEnd('\') }
@@ -1035,11 +1037,14 @@ Write-Log '===================================================================='
 if ($config.CleanupOldLogs -and $config.LogRetentionCount -ge 1) {
     $oldLogs = @(Get-ChildItem -LiteralPath $LogDir -Filter 'WindowsHealthRepairUtility_*.log' -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -Skip $config.LogRetentionCount)
-    foreach ($l in $oldLogs) {
+    $oldJsonLogs = @(Get-ChildItem -LiteralPath $LogDir -Filter 'WindowsHealthRepairUtility_*.jsonl' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -Skip $config.LogRetentionCount)
+    foreach ($l in ($oldLogs + $oldJsonLogs)) {
         Remove-Item -LiteralPath $l.FullName -Force -ErrorAction SilentlyContinue
     }
-    if ($oldLogs.Count -gt 0) {
-        Write-Log ('Log retention: removed ' + $oldLogs.Count + ' old log(s), keeping the last ' + $config.LogRetentionCount + '.')
+    $removed = $oldLogs.Count + $oldJsonLogs.Count
+    if ($removed -gt 0) {
+        Write-Log ('Log retention: removed ' + $removed + ' old log(s), keeping the last ' + $config.LogRetentionCount + '.')
     }
 }
 
