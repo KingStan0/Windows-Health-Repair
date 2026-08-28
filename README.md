@@ -23,9 +23,11 @@ Accept the UAC prompt and wait. A typical run takes 10-20 minutes. DISM may sit 
 | `-Schedule` / `-Unschedule` | Register / remove the weekly Sunday 03:00 task (highest privileges) |
 | `-ScheduledRun` | Silent mode for scheduled / CI runs: no popup, no prompts |
 | `-Source <path>` | Local `install.wim` / `install.esd` or a folder containing them - DISM fallback source |
+| `-LogPath <path>` | Override log directory (default: script folder, fallback `%TEMP%`) |
 | `-EmptyRecycleBin` | Also empty the Recycle Bin |
+| `-WhatIf` / `-Confirm` | Preview what would happen / prompt before destructive steps (implies report-only for `-WhatIf`) |
 
-The script auto-elevates via UAC, and arguments passed to the `.bat` are forwarded to the script.
+The script auto-elevates via UAC, and arguments passed to the `.bat` are forwarded to the script. Unknown keys in `WindowsHealthRepair.json` are logged as warnings and ignored.
 
 ## Configuration
 
@@ -54,7 +56,7 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 
 ## What it runs
 
-- **Pre-flight** - CheckHealth, system baseline (install date, uptime, disk, memory, pending reboot), internet and disk-space checks
+- **Pre-flight** - CheckHealth, system baseline (install date, uptime, disk, memory, pending reboot via `RebootPending`/`PackagesPending`/`RebootRequired` + `PendingFileRenameOperations`), internet and disk-space checks
 - **Phase 1** - DISM ScanHealth + RestoreHealth; retries with a local ISO source if Windows Update fails
 - **Phase 2** - `sfc /scannow`, verdict verified from CBS.log, second pass if repairs were applied
 - **Phase 3** - Component-store analysis + cleanup, Windows Update cache, temp files, optional Recycle Bin

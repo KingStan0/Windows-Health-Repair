@@ -15,6 +15,7 @@ BeforeAll {
 
     . ([scriptblock]::Create((Get-DefinedFunction 'Format-Duration').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-DismLocalSource').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Get-CbsLinesSince').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-SfcCbsResult').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Build-RelaunchArgs').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Coerce-ConfigValue').Extent.Text))
@@ -44,13 +45,31 @@ Describe 'Script file sanity' {
 
     It 'declares the parameter set' {
         $paramNames = $Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
-        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin', 'CheckDisk')) {
+        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin', 'CheckDisk', 'LogPath')) {
             $paramNames | Should -Contain $name
         }
     }
 
+    It 'supports WhatIf via SupportsShouldProcess' {
+        $Ast.ParamBlock.Attributes | Where-Object { $_.TypeName.Name -eq 'CmdletBinding' } | ForEach-Object { $_.NamedArguments } | Where-Object { $_.ArgumentName -eq 'SupportsShouldProcess' } | Should -Not -BeNullOrEmpty
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'ShouldProcess'
+    }
+
+    It 'handles custom LogPath' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '\$LogPath'
+        $body | Should -Match 'New-Item.*LogDir'
+    }
+
+    It 'warns on unknown config keys' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'unknownConfigKeys'
+        $body | Should -Match 'Unknown config keys ignored'
+    }
+
     It 'defines all required functions' {
-        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-DismLocalSource', 'Get-DirSizeBytes', 'Add-LogTail', 'Build-RelaunchArgs', 'Coerce-ConfigValue', 'Get-ChkdskExitText', 'Get-UnrepairableSfcFiles', 'Get-PendingReboot')) {
+        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-CbsLinesSince', 'Get-DismLocalSource', 'Get-DirSizeBytes', 'Add-LogTail', 'Build-RelaunchArgs', 'Coerce-ConfigValue', 'Get-ChkdskExitText', 'Get-UnrepairableSfcFiles', 'Get-PendingReboot')) {
             Get-DefinedFunction $name | Should -Not -BeNullOrEmpty
         }
     }
@@ -130,6 +149,33 @@ Describe 'Script file sanity' {
         $invoke = Get-DefinedFunction 'Invoke-NativeTool'
         $invoke.Extent.Text | Should -Match '-replace .*"'
     }
+
+    It 'doubles trailing backslashes in native tool arguments' {
+        $invoke = Get-DefinedFunction 'Invoke-NativeTool'
+        $invoke.Extent.Text | Should -Match '\(\\\\\+\)\$'
+    }
+
+    It 'guards Show-Progress against zero totalSteps' {
+        $sp = Get-DefinedFunction 'Show-Progress'
+        $sp.Extent.Text | Should -Match 'totalSteps -le 0'
+    }
+
+    It 'writes blank lines to both console and log' {
+        $wl = Get-DefinedFunction 'Write-Log'
+        $wl.Extent.Text | Should -Match 'Add-Content.*LogFile'
+        $wl.Extent.Text | Should -Match 'IsNullOrEmpty'
+    }
+
+    It 'validates DISM source file extensions' {
+        $src = Get-DefinedFunction 'Get-DismLocalSource'
+        $src.Extent.Text | Should -Match 'wim.*esd'
+    }
+
+    It 'checks additional reboot pending locations' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'PackagesPending'
+        $body | Should -Match 'PendingFileRenameOperations'
+    }
 }
 
 Describe 'Build-RelaunchArgs' {
@@ -151,6 +197,18 @@ Describe 'Build-RelaunchArgs' {
         $args | Should -Contain '-Source'
         $args | Should -Contain '"C:\My ISO\sources\install.wim"'
     }
+
+    It 'doubles trailing backslashes so the closing quote is not escaped' {
+        $args = Build-RelaunchArgs -BoundParameters @{ Source = 'C:\My Path\' } -CommandPath 'C:\test.ps1'
+        $args | Should -Contain '"C:\My Path\\"'
+        $args2 = Build-RelaunchArgs -BoundParameters @{} -CommandPath 'C:\My Path\'
+        $args2[4] | Should -Be '"C:\My Path\\"'
+    }
+
+    It 'escapes embedded double quotes' {
+        $args = Build-RelaunchArgs -BoundParameters @{ Source = 'C:\My "Path' } -CommandPath 'C:\test.ps1'
+        ($args -join ' ') | Should -Match '\\"'
+    }
 }
 
 Describe 'Coerce-ConfigValue' {
@@ -160,11 +218,22 @@ Describe 'Coerce-ConfigValue' {
         Coerce-ConfigValue -DefaultValue $false -LoadedValue 'FALSE' | Should -Be $false
         Coerce-ConfigValue -DefaultValue $true -LoadedValue '1' | Should -Be $true
         Coerce-ConfigValue -DefaultValue $true -LoadedValue '0' | Should -Be $false
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue ' true ' | Should -Be $true
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue ' FALSE ' | Should -Be $false
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue ' 1 ' | Should -Be $true
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue ' yes ' | Should -Be $true
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue ' no ' | Should -Be $false
+    }
+
+    It 'converts string integers to integers with trimming' {
+        Coerce-ConfigValue -DefaultValue 10 -LoadedValue ' 20 ' | Should -Be 20
+        Coerce-ConfigValue -DefaultValue 10 -LoadedValue '0' | Should -Be 0
     }
 
     It 'passes through JSON booleans and other types unchanged' {
         Coerce-ConfigValue -DefaultValue $true -LoadedValue $false | Should -Be $false
-        Coerce-ConfigValue -DefaultValue 10 -LoadedValue '10' | Should -Be '10'
+        Coerce-ConfigValue -DefaultValue 10 -LoadedValue '10' | Should -Be 10
+        Coerce-ConfigValue -DefaultValue 10 -LoadedValue 'notanint' | Should -Be 'notanint'
     }
 }
 
@@ -236,6 +305,12 @@ Describe 'Get-DismLocalSource' {
     It 'returns empty when no manual source is given' {
         Get-DismLocalSource -ManualSource '' | Should -Be ''
     }
+
+    It 'returns empty for a file with an unsupported extension' {
+        $bad = Join-Path $TestDrive 'bad.txt'
+        Set-Content -LiteralPath $bad -Value 'dummy' -Encoding UTF8
+        Get-DismLocalSource -ManualSource $bad | Should -Be ''
+    }
 }
 
 Describe 'Get-ChkdskExitText' {
@@ -286,7 +361,8 @@ Describe 'Get-UnrepairableSfcFiles' {
     }
 
     It 'returns empty for a missing CBS.log' {
-        Get-UnrepairableSfcFiles -CbsPath (Join-Path $TestDrive 'nope.log') | Should -Be $null
+        $r = Get-UnrepairableSfcFiles -CbsPath (Join-Path $TestDrive 'nope.log')
+        $r | Should -BeNullOrEmpty
     }
 
     It 'ignores the AppX ?? placeholder in Cannot repair member file lines' {
@@ -299,11 +375,28 @@ Describe 'Get-UnrepairableSfcFiles' {
         $r | Should -Not -Contain '??'
         $r | Should -Contain 'C:\Windows\System32\bad3.dll'
     }
+
+    It 'only returns unrepairable files timestamped after the run start' {
+        $Cbs = Join-Path $TestDrive 'CBS_time.log'
+        $cutoff = [datetime]'2026-08-14 12:00:00'
+        Set-Content -LiteralPath $Cbs -Value @(
+            '2026-08-14 11:00:00, Info CSI 00000001 [SR] Cannot repair member file [l:12]""C:\old.dll"" of Component'
+            '2026-08-14 13:00:00, Info CSI 00000002 [SR] Cannot repair member file [l:12]""C:\new.dll"" of Component'
+        ) -Encoding UTF8
+        $r = Get-UnrepairableSfcFiles -Since $cutoff -CbsPath $Cbs
+        $r | Should -Contain 'C:\new.dll'
+        $r | Should -Not -Contain 'C:\old.dll'
+    }
 }
 
 Describe 'Launcher batch file' {
     It 'forwards arguments passed to the .bat to the PowerShell script' {
         $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health Utility.bat') -Raw
         $bat | Should -Match '-File .*Repair-WindowsHealthUtility\.ps1" %\*'
+    }
+
+    It 'uses doubled double-quotes for Unblock-File (handles single-quote in path)' {
+        $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health Utility.bat') -Raw
+        $bat | Should -Match 'Unblock-File -LiteralPath "".*""'
     }
 }

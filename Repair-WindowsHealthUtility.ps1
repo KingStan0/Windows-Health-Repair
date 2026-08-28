@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$EmptyRecycleBin,
     [switch]$ReportOnly,
@@ -8,7 +8,8 @@ param(
     [switch]$Unschedule,
     [switch]$ScheduledRun,
     [string]$Source = '',
-    [switch]$CheckDisk
+    [switch]$CheckDisk,
+    [string]$LogPath = ''
 )
 
 function Build-RelaunchArgs {
@@ -16,7 +17,9 @@ function Build-RelaunchArgs {
         [Parameter(Mandatory)][hashtable]$BoundParameters,
         [Parameter(Mandatory)][string]$CommandPath
     )
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"{0}"' -f $CommandPath))
+    $escapedPath = $CommandPath -replace '"', '\"'
+    $escapedPath = $escapedPath -replace '(\\+)$', '$1$1'
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', ('"{0}"' -f $escapedPath))
     foreach ($key in $BoundParameters.Keys) {
         $value = $BoundParameters[$key]
         if ($value -is [switch] -or $value -is [bool]) {
@@ -24,7 +27,9 @@ function Build-RelaunchArgs {
         }
         else {
             $argList += '-' + $key
-            $argList += ('"{0}"' -f ([string]$value))
+            $escapedValue = ([string]$value) -replace '"', '\"'
+            $escapedValue = $escapedValue -replace '(\\+)$', '$1$1'
+            $argList += ('"{0}"' -f $escapedValue)
         }
     }
     return $argList
@@ -33,7 +38,9 @@ function Build-RelaunchArgs {
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     try {
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList (Build-RelaunchArgs -BoundParameters $PSBoundParameters -CommandPath $PSCommandPath)
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
+        Start-Process -FilePath $psExe -Verb RunAs -ArgumentList (Build-RelaunchArgs -BoundParameters $PSBoundParameters -CommandPath $PSCommandPath)
     }
     catch {
         [Console]::WriteLine('This script requires Administrator privileges.')
@@ -43,7 +50,10 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 }
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $env:TEMP }
-$LogDir = $ScriptDir
+$LogDir = if ($LogPath) { $LogPath } else { $ScriptDir }
+if ($LogPath -and -not (Test-Path -LiteralPath $LogDir)) {
+    try { New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction Stop | Out-Null } catch { $LogDir = $ScriptDir }
+}
 $LogFile = Join-Path $LogDir ('WindowsHealthRepairUtility_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 try {
     Add-Content -Path $LogFile -Value '' -Encoding UTF8 -ErrorAction Stop
@@ -78,20 +88,30 @@ $config = @{
 function Coerce-ConfigValue {
     param($DefaultValue, $LoadedValue)
     if ($DefaultValue -is [bool] -and $LoadedValue -is [string]) {
-        if ($LoadedValue -match '^(?i:true|1|yes)$') { return $true }
-        if ($LoadedValue -match '^(?i:false|0|no)$') { return $false }
+        $trimmed = $LoadedValue.Trim()
+        if ($trimmed -match '^(?i:true|1|yes)$') { return $true }
+        if ($trimmed -match '^(?i:false|0|no)$') { return $false }
+    }
+    if ($DefaultValue -is [int] -and $LoadedValue -is [string]) {
+        $trimmed = $LoadedValue.Trim()
+        $parsed = 0
+        if ([int]::TryParse($trimmed, [ref]$parsed)) { return $parsed }
     }
     return $LoadedValue
 }
 
 $ConfigPath = Join-Path $ScriptDir 'WindowsHealthRepair.json'
 $configSource = 'built-in defaults'
+$unknownConfigKeys = @()
 if (Test-Path -LiteralPath $ConfigPath) {
     try {
         $loaded = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
         foreach ($prop in $loaded.PSObject.Properties) {
             if ($config.ContainsKey($prop.Name)) {
                 $config[$prop.Name] = Coerce-ConfigValue -DefaultValue $config[$prop.Name] -LoadedValue $prop.Value
+            }
+            else {
+                $unknownConfigKeys += $prop.Name
             }
         }
         $configSource = 'WindowsHealthRepair.json'
@@ -121,8 +141,10 @@ if ($Unschedule) {
 
 if ($Schedule) {
     try {
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
         $taskFile = ('"{0}"' -f $PSCommandPath)
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy RemoteSigned -File ' + $taskFile + ' -ScheduledRun')
+        $action = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoProfile -ExecutionPolicy RemoteSigned -File ' + $taskFile + ' -ScheduledRun')
         $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '03:00'
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd
         Register-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Settings $settings -Description 'Weekly Windows health repair (DISM, SFC, cleanup). Logs are saved in the script folder.' -RunLevel Highest -Force -ErrorAction Stop | Out-Null
@@ -134,6 +156,10 @@ if ($Schedule) {
         exit 2
     }
     exit 0
+}
+
+if (-not $PSCmdlet.ShouldProcess("System", "Run Windows Health Repair (DISM, SFC, cleanup)")) {
+    $ReportOnly = $true
 }
 
 $script:results = New-Object System.Collections.ArrayList
@@ -159,6 +185,7 @@ function Write-Log {
     )
     if ([string]::IsNullOrEmpty($Message)) {
         Write-Host ''
+        try { Add-Content -Path $LogFile -Value '' -Encoding UTF8 -ErrorAction Stop } catch { }
         return
     }
     $stamp = '[{0:HH:mm:ss}] ' -f (Get-Date)
@@ -169,12 +196,14 @@ function Write-Log {
 function Show-Progress {
     param([string]$Label)
     $script:stepPos++
+    if ($script:totalSteps -le 0) { return }
     if ($Host.Name -ne 'ConsoleHost') { return }
     $pct = [Math]::Floor(100 * $script:stepPos / $script:totalSteps)
     $barLen = 20
     $filled = [Math]::Floor($barLen * $script:stepPos / $script:totalSteps)
     $bar = ('#' * $filled).PadRight($barLen, '-')
-    $elapsedM = [Math]::Floor(((Get-Date) - $totalRunStart).TotalMinutes)
+    $elapsedM = 0
+    try { if ($null -ne $totalRunStart) { $elapsedM = [Math]::Floor(((Get-Date) - $totalRunStart).TotalMinutes) } } catch { $elapsedM = 0 }
     Write-Host ('[{0}] {1,3}% {2}  (step {3}/{4}, {5}m elapsed)' -f $bar, $pct, $Label, $script:stepPos, $script:totalSteps, $elapsedM)
     try { $Host.UI.RawUI.WindowTitle = '{0}% - {1} - Windows Health Repair Utility ({2}m)' -f $pct, $Label, $elapsedM } catch { }
 }
@@ -211,7 +240,11 @@ function Invoke-NativeTool {
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
-    $psi.Arguments = (($ArgumentList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' ')
+    $psi.Arguments = (($ArgumentList | ForEach-Object {
+        $e = $_ -replace '"', '\"'
+        $e = $e -replace '(\\+)$', '$1$1'
+        '"' + $e + '"'
+    }) -join ' ')
     $psi.UseShellExecute = $false
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($config.UseHighPriority) {
@@ -269,7 +302,7 @@ function Add-LogTail {
 
 function Get-DirSizeBytes {
     param([string]$Path)
-    $sum = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $sum = (Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     if ($null -eq $sum) { return [long]0 }
     return $sum
 }
@@ -283,10 +316,8 @@ function Remove-TreeFast {
         Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
         return
     }
-    try {
-        & cmd.exe /c ('rmdir /s /q "' + $Path + '"') 2>$null | Out-Null
-    }
-    catch { }
+    $escapedPath = $Path -replace '"', '""'
+    & cmd.exe /c ('rmdir /s /q "' + $escapedPath + '"') 2>$null | Out-Null
 }
 
 function Test-ProtectedPath {
@@ -301,28 +332,33 @@ function Test-ProtectedPath {
     return $false
 }
 
+function Get-CbsLinesSince {
+    param([string[]]$Lines, [datetime]$Since)
+    if ($null -eq $Since -or $Since -eq [datetime]::MinValue) { return $Lines }
+    $parsed = @($Lines | ForEach-Object {
+        $m = [regex]::Match($_, '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')
+        if ($m.Success) {
+            $ts = [datetime]::MinValue
+            if ([datetime]::TryParseExact($m.Value, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$ts)) {
+                [pscustomobject]@{ Ts = $ts; Text = $_ }
+            }
+        }
+    } | Where-Object { $null -ne $_ })
+    if ($parsed.Count -gt 0) {
+        return @($parsed | Where-Object { $_.Ts -ge $Since } | ForEach-Object { $_.Text })
+    }
+    return $Lines
+}
+
 function Get-SfcCbsResult {
     param(
-        [datetime]$Since,
+        [datetime]$Since = [datetime]::MinValue,
         [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
     )
     $result = @{ RepairingTotal = 0; RepairedFiles = 0 }
     if (-not (Test-Path -LiteralPath $CbsPath)) { return $result }
     $lines = @(Get-Content -LiteralPath $CbsPath -Tail 5000)
-    if ($null -ne $Since) {
-        $parsed = @($lines | ForEach-Object {
-            $m = [regex]::Match($_, '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')
-            if ($m.Success) {
-                $ts = [datetime]::MinValue
-                if ([datetime]::TryParseExact($m.Value, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$ts)) {
-                    [pscustomobject]@{ Ts = $ts; Text = $_ }
-                }
-            }
-        } | Where-Object { $null -ne $_ })
-        if ($parsed.Count -gt 0) {
-            $lines = @($parsed | Where-Object { $_.Ts -ge $Since } | ForEach-Object { $_.Text })
-        }
-    }
+    $lines = Get-CbsLinesSince -Lines $lines -Since $Since
     $repairing = $lines | Select-String -Pattern '\[SR\] Repairing (\d+) components' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value }
     if ($repairing) { $result.RepairingTotal = ($repairing | Measure-Object -Sum).Sum }
     $result.RepairedFiles = ($lines | Select-String -Pattern '\[SR\] Repaired ').Count
@@ -341,11 +377,12 @@ function Get-DismLocalSource {
                 if (Test-Path -LiteralPath $esd) { return $esd }
                 return ''
             }
-            return $ManualSource
+            if ($item.Extension -match '(?i)^\.(wim|esd)$') { return $ManualSource }
+            return ''
         }
         return ''
     }
-    foreach ($drive in (Get-PSDrive -PSProvider FileSystem | Where-Object { $null -ne $_.Root })) {
+    foreach ($drive in (Get-PSDrive -PSProvider FileSystem | Where-Object { -not [string]::IsNullOrEmpty($_.Root) })) {
         $wim = Join-Path $drive.Root 'sources\install.wim'
         if (Test-Path -LiteralPath $wim) { return $wim }
         $esd = Join-Path $drive.Root 'sources\install.esd'
@@ -357,23 +394,40 @@ function Get-DismLocalSource {
 function Get-PendingReboot {
     $paths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending',
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
     )
     foreach ($p in $paths) {
         if (Test-Path -LiteralPath $p) { return $true }
     }
+    try {
+        $pfro = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
+        if ($null -ne $pfro -and $null -ne $pfro.PendingFileRenameOperations) {
+            $val = $pfro.PendingFileRenameOperations
+            if ($val -is [array]) {
+                if ($val.Count -gt 0) { return $true }
+            }
+            elseif (-not [string]::IsNullOrEmpty($val)) { return $true }
+            elseif ($val.Length -gt 0) { return $true }
+        }
+    }
+    catch { }
     return $false
 }
 
 function Get-UnrepairableSfcFiles {
     param(
+        [datetime]$Since = [datetime]::MinValue,
         [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
     )
     if (-not (Test-Path -LiteralPath $CbsPath)) { return @() }
-    $names = @(Get-Content -LiteralPath $CbsPath -Tail 5000 |
+    $lines = @(Get-Content -LiteralPath $CbsPath -Tail 5000)
+    $lines = Get-CbsLinesSince -Lines $lines -Since $Since
+    $names = @($lines |
         Select-String -Pattern '\[SR\] Cannot repair member file.*?"([^"]+)"' |
         ForEach-Object { $_.Matches[0].Groups[1].Value } |
         Where-Object { $_ -ne '??' } | Select-Object -Unique)
+    if ($null -eq $names) { return @() }
     return $names
 }
 
@@ -419,27 +473,29 @@ Write-Log 'do not close this window until it finishes.' -Color Magenta
 if ($config.UseHighPriority) {
     Write-Log 'Running at High CPU priority - the machine may feel slower while it works.' -Color Magenta
 }
+if ($unknownConfigKeys.Count -gt 0) {
+    Write-Log ('WARNING: Unknown config keys ignored: ' + ($unknownConfigKeys -join ', ')) -Color Yellow
+}
 Write-Log ''
 
 Show-Progress 'Pre-flight'
 
 Write-Log 'SYSTEM BASELINE:' -Color Cyan
 try {
-    $uptime = (Get-Date) - (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+    $uptime = (Get-Date) - $os.LastBootUpTime
     if ($uptime -gt [TimeSpan]::Zero) {
         Write-Log ('  Uptime : ' + '{0}d {1}h {2}m' -f $uptime.Days, $uptime.Hours, $uptime.Minutes)
     }
 }
 catch { }
 try {
-    $osMem = Get-CimInstance -ClassName Win32_OperatingSystem
-    $availMemGb = $osMem.FreePhysicalMemory / 1MB
-    $totalMemGb = $osMem.TotalVisibleMemorySize / 1MB
+    $availMemGb = $os.FreePhysicalMemory / 1MB
+    $totalMemGb = $os.TotalVisibleMemorySize / 1MB
     Write-Log ('  Memory : {0:N1} GB free of {1:N1} GB ({2:P0} free)' -f $availMemGb, $totalMemGb, ($availMemGb / $totalMemGb))
 }
 catch { }
 try {
-    foreach ($d in (Get-PSDrive -PSProvider FileSystem | Where-Object { $null -ne $_.Root -and $null -ne $_.Free })) {
+    foreach ($d in (Get-PSDrive -PSProvider FileSystem | Where-Object { -not [string]::IsNullOrEmpty($_.Root) -and $null -ne $_.Free })) {
         Write-Log ('  Drive  : {0} {1:N1} GB free of {2:N1} GB' -f $d.Name, ($d.Free / 1GB), (($d.Used + $d.Free) / 1GB))
     }
 }
@@ -645,7 +701,7 @@ if ($config.RunSfc) {
     elseif ($sfcExit -eq 3) {
         $hadError = $true
         Write-Log 'SFC result: could not repair some files (exit 3). Restart, then run this script again.' -Color Yellow
-        $unrep = Get-UnrepairableSfcFiles
+        $unrep = Get-UnrepairableSfcFiles -Since $totalRunStart
         if ($unrep.Count -gt 0) {
             Write-Log 'Files that could not be repaired:' -Color Yellow
             foreach ($f in $unrep) { Write-Log ('  - ' + $f) }
@@ -824,7 +880,10 @@ if ($config.RunTempCleanup -and -not $ReportOnly) {
     }
     $totalFreed = [double]0
     $skipPaths = @($LogFile, $ScriptDir)
-    $skipPaths = @($skipPaths | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') })
+    $skipPaths = @($skipPaths | ForEach-Object {
+        $p = $_
+        try { [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { $p.TrimEnd('\') }
+    })
     foreach ($target in ($tempTargets | Select-Object -Unique)) {
         $size = Get-DirSizeBytes -Path $target
         $items = @(Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue)

@@ -41,6 +41,14 @@ jobs:
             throw "Syntax errors found in Repair-WindowsHealthUtility.ps1"
           }
           Write-Host "Parse OK under PowerShell 5.1"
+      - name: ASCII and BOM check
+        shell: pwsh
+        run: |
+          $b=[System.IO.File]::ReadAllBytes((Join-Path $env:GITHUB_WORKSPACE 'Repair-WindowsHealthUtility.ps1'))
+          $n=@($b | Where-Object { $_ -gt 127 }).Count
+          if ($n -gt 0) { throw "Non-ASCII bytes found: $n" }
+          if ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { throw "BOM detected" }
+          Write-Host "ASCII OK, no BOM"
       - name: Install Pester 5
         shell: pwsh
         run: Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck -MinimumVersion 5.0
