@@ -24,6 +24,7 @@ Accept the UAC prompt and wait. A typical run takes 10-20 minutes. DISM may sit 
 | `-ScheduledRun` | Silent mode for scheduled / CI runs: no popup, no prompts |
 | `-Source <path>` | Local `install.wim` / `install.esd` or a folder containing them - DISM fallback source |
 | `-LogPath <path>` | Override log directory (default: script folder, fallback `%TEMP%`) |
+| `-JsonLog` | Also write `*.jsonl` machine-readable log alongside text log |
 | `-EmptyRecycleBin` | Also empty the Recycle Bin |
 | `-WhatIf` / `-Confirm` | Preview what would happen / prompt before destructive steps (implies report-only for `-WhatIf`) |
 
@@ -41,7 +42,7 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 | `RunChkdsk` | `false` | Enable the disk-check phase (also requires `-CheckDisk`) |
 | `CleanCurrentUserTemp`, `CleanAllUsersTemp`, `CleanSystemTemp` | `true` | Which temp locations to clean |
 | `StallWarnMinutes`, `SfcStallWarnMinutes`, `ChkdskStallWarnMinutes` | `12` / `15` / `15` | Watchdog warning thresholds (warns, never kills) |
-| `LogRetentionCount`, `CleanupOldLogs` | `10` / `true` | Keep the last N logs |
+| `LogRetentionCount`, `CleanupOldLogs` | `10` / `true` | Keep the last N logs (`<1` disables pruning) |
 | `TcpCheckTimeoutSeconds` | `5` | Internet pre-check timeout |
 | `ShowCompletionPopup` | `true` | Summary dialog at the end (always suppressed with `-ScheduledRun`) |
 | `UseHighPriority` | `true` | Run the tool and all repair tools at High CPU priority; cleanup uses fast native deletion |
@@ -66,7 +67,7 @@ Windows Update services (`wuauserv`, `dosvc`, `bits`) are paused only while the 
 
 ## Logs
 
-- Script log: `WindowsHealthRepairUtility_<date>.log` next to the script
+- Script log: `WindowsHealthRepairUtility_<date>.log` next to the script (`-LogPath` overrides, `-JsonLog` adds `*.jsonl`)
 - DISM: `%SystemRoot%\Logs\DISM\dism.log` - SFC: `%SystemRoot%\Logs\CBS\CBS.log`
 
 ## Safety

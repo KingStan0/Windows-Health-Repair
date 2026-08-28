@@ -1,5 +1,56 @@
 #Requires -Version 5.1
 
+<#
+.SYNOPSIS
+    One-click Windows health repair utility (WHRU) - DISM, SFC, cleanup.
+
+.DESCRIPTION
+    Repairs the Windows component store (DISM ScanHealth/RestoreHealth),
+    protected system files (SFC /scannow with CBS.log verification and second
+    pass), and performs safe disk cleanup (component store, Windows Update
+    cache, temp files, optional Recycle Bin). Fully logged with progress.
+
+.PARAMETER ReportOnly
+    Health check only: DISM ScanHealth + sfc /verifyonly. No repairs or deletions.
+
+.PARAMETER CheckDisk
+    Add online chkdsk /scan (no reboot) with dirty-bit pre-check. Requires
+    config RunChkdsk=true and -not ReportOnly.
+
+.PARAMETER Source
+    Local install.wim/install.esd or folder containing sources\install.wim|esd.
+    Used as DISM /Source fallback and for SafeRestoreOnly.
+
+.PARAMETER EmptyRecycleBin
+    Also empty the Recycle Bin (otherwise left untouched).
+
+.PARAMETER Schedule
+    Register weekly scheduled task Sunday 03:00 (highest privileges).
+
+.PARAMETER Unschedule
+    Remove scheduled task.
+
+.PARAMETER ScheduledRun
+    Silent mode for scheduled/CI: no popup, no prompts.
+
+.PARAMETER LogPath
+    Override log directory (default: script folder, fallback %TEMP%).
+
+.PARAMETER WhatIf
+    Preview mode (implies ReportOnly). Shows what would happen.
+
+.PARAMETER JsonLog
+    Also write machine-readable JSON lines to a .jsonl file alongside the text log.
+
+.EXAMPLE
+    .\Repair-WindowsHealthUtility.ps1 -ReportOnly
+    .\Repair-WindowsHealthUtility.ps1 -LogPath D:\Logs -CheckDisk
+    Repair Windows Health Utility.bat -WhatIf
+
+.NOTES
+    Requires Administrator, PowerShell 5.1, Windows 10/11.
+#>
+
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$EmptyRecycleBin,
@@ -9,7 +60,8 @@ param(
     [switch]$ScheduledRun,
     [string]$Source = '',
     [switch]$CheckDisk,
-    [string]$LogPath = ''
+    [string]$LogPath = '',
+    [switch]$JsonLog
 )
 
 function Build-RelaunchArgs {
@@ -50,10 +102,16 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 }
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $env:TEMP }
-$LogDir = if ($LogPath) { $LogPath } else { $ScriptDir }
-if ($LogPath -and -not (Test-Path -LiteralPath $LogDir)) {
-    try { New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction Stop | Out-Null } catch { $LogDir = $ScriptDir }
-}
+$LogDir = if ($LogPath) {
+    $p = $LogPath.TrimEnd('\')
+    try {
+        $leaf = Split-Path $p -Leaf
+        if ($leaf -match '\.' -and -not (Test-Path -LiteralPath $p -PathType Container)) { $p = Split-Path $p -Parent }
+        if ($p -and -not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force -ErrorAction Stop | Out-Null }
+        if (-not $p) { $p = $ScriptDir }
+        $p
+    } catch { $ScriptDir }
+} else { $ScriptDir }
 $LogFile = Join-Path $LogDir ('WindowsHealthRepairUtility_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 try {
     Add-Content -Path $LogFile -Value '' -Encoding UTF8 -ErrorAction Stop
@@ -61,6 +119,10 @@ try {
 catch {
     $LogDir = $env:TEMP
     $LogFile = Join-Path $LogDir ('WindowsHealthRepairUtility_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+}
+$JsonLogFile = $null
+if ($JsonLog) {
+    $JsonLogFile = [System.IO.Path]::ChangeExtension($LogFile, '.jsonl')
 }
 
 $config = @{
@@ -160,6 +222,7 @@ if ($Schedule) {
 
 if (-not $PSCmdlet.ShouldProcess("System", "Run Windows Health Repair (DISM, SFC, cleanup)")) {
     $ReportOnly = $true
+    [Console]::WriteLine('WhatIf: preview mode - no repairs or cleanup will be performed.')
 }
 
 $script:results = New-Object System.Collections.ArrayList
@@ -186,10 +249,22 @@ function Write-Log {
     if ([string]::IsNullOrEmpty($Message)) {
         Write-Host ''
         try { Add-Content -Path $LogFile -Value '' -Encoding UTF8 -ErrorAction Stop } catch { }
+        if ($JsonLog -and $JsonLogFile) {
+            try {
+                $j = @{ timestamp = (Get-Date).ToString('o'); level = $Color; message = '' } | ConvertTo-Json -Compress
+                Add-Content -Path $JsonLogFile -Value $j -Encoding UTF8 -ErrorAction Stop
+            } catch { }
+        }
         return
     }
     $stamp = '[{0:HH:mm:ss}] ' -f (Get-Date)
     try { Add-Content -Path $LogFile -Value ($stamp + $Message) -Encoding UTF8 -ErrorAction Stop } catch { }
+    if ($JsonLog -and $JsonLogFile) {
+        try {
+            $j = @{ timestamp = (Get-Date).ToString('o'); level = $Color; message = $Message } | ConvertTo-Json -Compress
+            Add-Content -Path $JsonLogFile -Value $j -Encoding UTF8 -ErrorAction Stop
+        } catch { }
+    }
     Write-Host ($stamp + $Message) -ForegroundColor $Color
 }
 
@@ -408,7 +483,6 @@ function Get-PendingReboot {
                 if ($val.Count -gt 0) { return $true }
             }
             elseif (-not [string]::IsNullOrEmpty($val)) { return $true }
-            elseif ($val.Length -gt 0) { return $true }
         }
     }
     catch { }

@@ -45,7 +45,7 @@ Describe 'Script file sanity' {
 
     It 'declares the parameter set' {
         $paramNames = $Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
-        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin', 'CheckDisk', 'LogPath')) {
+        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin', 'CheckDisk', 'LogPath', 'JsonLog')) {
             $paramNames | Should -Contain $name
         }
     }
@@ -59,13 +59,19 @@ Describe 'Script file sanity' {
     It 'handles custom LogPath' {
         $body = $Ast.Extent.Text
         $body | Should -Match '\$LogPath'
-        $body | Should -Match 'New-Item.*LogDir'
+        $body | Should -Match 'New-Item.*Directory'
     }
 
     It 'warns on unknown config keys' {
         $body = $Ast.Extent.Text
         $body | Should -Match 'unknownConfigKeys'
         $body | Should -Match 'Unknown config keys ignored'
+    }
+
+    It 'handles JsonLog switch' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '\$JsonLog'
+        $body | Should -Match 'JsonLogFile'
     }
 
     It 'defines all required functions' {
@@ -265,6 +271,27 @@ Describe 'Get-SfcCbsResult' {
         Set-Content -LiteralPath $CbsNoTs -Value @('no timestamp line [SR] Repairing 7 components') -Encoding UTF8
         $r = Get-SfcCbsResult -Since $cutoff -CbsPath $CbsNoTs
         $r.RepairingTotal | Should -Be 7
+    }
+}
+
+Describe 'Get-CbsLinesSince' {
+    It 'returns all lines when Since is MinValue' {
+        $lines = @('2026-08-14 11:00:00, Info [SR] Repairing 1 components', '2026-08-14 13:00:00, Info [SR] Repairing 2 components')
+        $r = Get-CbsLinesSince -Lines $lines -Since ([datetime]::MinValue)
+        $r.Count | Should -Be 2
+    }
+
+    It 'filters to lines timestamped after Since' {
+        $lines = @('2026-08-14 11:00:00, Info [SR] Repairing 1 components', '2026-08-14 13:00:00, Info [SR] Repairing 2 components')
+        $r = Get-CbsLinesSince -Lines $lines -Since ([datetime]'2026-08-14 12:00:00')
+        @($r).Count | Should -Be 1
+        ($r -join ' ') | Should -Match '13:00:00'
+    }
+
+    It 'falls back to original lines when no timestamps are parseable' {
+        $lines = @('no timestamp [SR] Repairing 5 components', 'also no ts [SR] Repaired 1 files')
+        $r = Get-CbsLinesSince -Lines $lines -Since ([datetime]'2026-08-14 12:00:00')
+        $r.Count | Should -Be 2
     }
 }
 
