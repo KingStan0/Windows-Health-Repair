@@ -422,8 +422,8 @@ Describe 'Launcher batch file' {
         $bat | Should -Match '-File .*Repair-WindowsHealthUtility\.ps1" %\*'
     }
 
-    It 'uses doubled double-quotes for Unblock-File (handles single-quote in path)' {
+    It 'uses single quotes for Unblock-File (CMD-safe with spaces)' {
         $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health Utility.bat') -Raw
-        $bat | Should -Match 'Unblock-File -LiteralPath "".*""'
+        $bat | Should -Match "Unblock-File -LiteralPath '.*'"
     }
 }

@@ -587,6 +587,15 @@ try {
     $errSince = (Get-Date).AddHours(-24)
     $sysErrors = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Level = 1, 2; StartTime = $errSince } -ErrorAction SilentlyContinue)
     Write-Log ('  System errors (last 24h) : ' + $sysErrors.Count)
+    if ($sysErrors.Count -gt 0) {
+        try {
+            $topErrors = $sysErrors | Group-Object -Property ProviderName | Sort-Object Count -Descending | Select-Object -First 3
+            foreach ($g in $topErrors) {
+                $sample = $g.Group[0]
+                Write-Log ('    - {0} (ID {1}): {2} occurrence(s)' -f $g.Name, $sample.Id, $g.Count)
+            }
+        } catch { }
+    }
 }
 catch { Write-Log '  System errors (last 24h) : unavailable' }
 Write-Log ''
@@ -1029,7 +1038,9 @@ $freeAfter = (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue).Free
 if ($null -ne $freeBefore -and $null -ne $freeAfter) {
     $gbBefore = $freeBefore / 1GB
     $gbAfter = $freeAfter / 1GB
-    Write-Log ('  {0,-22} {1,-36}' -f 'Free disk space', ('{0:N1} GB -> {1:N1} GB' -f $gbBefore, $gbAfter))
+    $deltaNote = ''
+    if ($gbAfter -lt $gbBefore) { $deltaNote = ' (delta includes concurrent system writes)' }
+    Write-Log ('  {0,-22} {1,-36}{2}' -f 'Free disk space', ('{0:N1} GB -> {1:N1} GB' -f $gbBefore, $gbAfter), $deltaNote)
 }
 Write-Log ('  Full log saved to   : ' + $LogFile)
 Write-Log '====================================================================' -Color Cyan
