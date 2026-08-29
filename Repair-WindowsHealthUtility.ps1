@@ -211,7 +211,7 @@ if ($Schedule) {
         $action = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoProfile -ExecutionPolicy RemoteSigned -File ' + $taskFile + ' -ScheduledRun')
         $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '03:00'
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd
-        Register-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Settings $settings -Description 'Weekly Windows health repair (DISM, SFC, cleanup). Logs are saved in the script folder.' -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+        Register-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Settings $settings -Description 'Weekly Windows health repair (DISM, SFC, cleanup). Logs are saved in the script folder (or -LogPath).' -RunLevel Highest -Force -ErrorAction Stop | Out-Null
         [Console]::WriteLine('Scheduled task "' + $ScheduledTaskName + '" registered: every Sunday at 03:00.')
         [Console]::WriteLine('The task runs with highest privileges. To remove it later, run with -Unschedule.')
     }
