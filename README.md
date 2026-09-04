@@ -25,6 +25,7 @@ Accept the UAC prompt and wait. A typical run takes 10-20 minutes. DISM may sit 
 | `-Source <path>` | Local `install.wim` / `install.esd` or a folder containing them - DISM fallback source |
 | `-LogPath <path>` | Override log directory (default: script folder, fallback `%TEMP%`) |
 | `-JsonLog` | Also write `*.jsonl` machine-readable log alongside text log |
+| `-RepairIso <path>` | Windows 11 ISO for in-place repair install (`Fix problems using Windows Update` equivalent, 30-60m, reboot) |
 | `-EmptyRecycleBin` | Also empty the Recycle Bin |
 | `-WhatIf` / `-Confirm` | Preview what would happen / prompt before destructive steps (implies report-only for `-WhatIf`) |
 
@@ -60,8 +61,9 @@ Copy `WindowsHealthRepair.example.json` to `WindowsHealthRepair.json` next to th
 - **Pre-flight** - CheckHealth, system baseline (install date, uptime, disk, memory, pending reboot via `RebootPending`/`PackagesPending`/`RebootRequired` + `PendingFileRenameOperations`), internet and disk-space checks
 - **Phase 1** - DISM ScanHealth + RestoreHealth; retries with a local ISO source if Windows Update fails
 - **Phase 2** - `sfc /scannow`, verdict verified from CBS.log, second pass if repairs were applied
+- **Optional - repair install** - `setup.exe /auto upgrade` via `-RepairIso` after Phase 2 (30-60m, reboot, keep apps/files)
 - **Phase 3** - Component-store analysis + cleanup, Windows Update cache, temp files, optional Recycle Bin
-- **Optional** - `chkdsk /scan` after Phase 2
+- **Optional - chkdsk** - `chkdsk /scan` after Phase 2
 
 Windows Update services (`wuauserv`, `dosvc`, `bits`) are paused only while the cache is cleared and always restored to their previous state - a service you disabled stays disabled.
 

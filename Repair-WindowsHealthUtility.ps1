@@ -8,7 +8,9 @@
     Repairs the Windows component store (DISM ScanHealth/RestoreHealth),
     protected system files (SFC /scannow with CBS.log verification and second
     pass), and performs safe disk cleanup (component store, Windows Update
-    cache, temp files, optional Recycle Bin). Fully logged with progress.
+    cache, temp files, optional Recycle Bin). Optionally runs an in-place
+    repair install via Windows Setup (Fix problems using Windows Update
+    equivalent) when -RepairIso is provided. Fully logged with progress.
 
 .PARAMETER ReportOnly
     Health check only: DISM ScanHealth + sfc /verifyonly. No repairs or deletions.
@@ -42,10 +44,16 @@
 .PARAMETER JsonLog
     Also write machine-readable JSON lines to a .jsonl file alongside the text log.
 
+.PARAMETER RepairIso
+    Path to Windows 11 ISO for in-place repair install (Fix problems using
+    Windows Update equivalent). Runs setup.exe /auto upgrade /quiet after SFC.
+    Requires matching edition/lang/arch and enough free space. Implies reboot.
+
 .EXAMPLE
     .\Repair-WindowsHealthUtility.ps1 -ReportOnly
     .\Repair-WindowsHealthUtility.ps1 -LogPath D:\Logs -CheckDisk
     .\Repair-WindowsHealthUtility.ps1 -LogPath "C:\Data\My.App" -JsonLog
+    .\Repair-WindowsHealthUtility.ps1 -RepairIso D:\Win11_24H2_English_x64.iso
     Repair Windows Health Utility.bat -WhatIf
 
 .NOTES
@@ -62,7 +70,8 @@ param(
     [string]$Source = '',
     [switch]$CheckDisk,
     [string]$LogPath = '',
-    [switch]$JsonLog
+    [switch]$JsonLog,
+    [string]$RepairIso = ''
 )
 
 function Build-RelaunchArgs {
@@ -236,6 +245,7 @@ if ($config.RunDismScan -and $ReportOnly) { [void]$steps.Add('DISM ScanHealth (r
 if ($config.RunDismRestore -and -not $ReportOnly) { [void]$steps.Add('DISM RestoreHealth') }
 if ($config.RunSfc) { [void]$steps.Add('SFC') }
 if ($config.RunChkdsk -and $CheckDisk -and -not $ReportOnly) { [void]$steps.Add('Disk check') }
+if ($RepairIso -and -not $ReportOnly) { [void]$steps.Add('Repair install') }
 if ($config.RunComponentCleanup -and -not $ReportOnly) { [void]$steps.Add('Component cleanup') }
 if ($config.RunWindowsUpdateCache -and -not $ReportOnly) { [void]$steps.Add('Windows Update cache') }
 if ($config.RunTempCleanup -and -not $ReportOnly) { [void]$steps.Add('Temp files') }
@@ -842,6 +852,70 @@ else {
     else {
         Write-Log 'Disk check skipped (config: RunChkdsk = false).'
     }
+}
+
+if ($RepairIso -and -not $ReportOnly) {
+    Show-Progress 'Repair install'
+    Write-Log '====================================================================' -Color Cyan
+    Write-Log 'PHASE 2b: In-place repair install (Fix problems using Windows Update)' -Color Cyan
+    Write-Log '====================================================================' -Color Cyan
+    Write-Log 'This is the Fix problems using Windows Update equivalent: reinstalls Windows while keeping apps, files, and settings. Requires matching edition/lang/arch and 5+ GB free.' -Color Green
+    Write-Log 'Mounting ISO and launching Windows Setup with /auto upgrade /quiet /eula accept. This can take 30-60 minutes and will reboot automatically.' -Color Green
+    $riSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $riDetail = ''
+    $riExit = $null
+    if (-not (Test-Path -LiteralPath $RepairIso)) {
+        $riDetail = 'skipped (ISO not found)'
+        $hadError = $true
+        Write-Log ('Repair install ISO not found: ' + $RepairIso) -Color Yellow
+    }
+    elseif ($RepairIso -notmatch '(?i)\.iso$') {
+        $riDetail = 'skipped (not an ISO)'
+        $hadError = $true
+        Write-Log ('Repair install source must be a .iso file: ' + $RepairIso) -Color Yellow
+    }
+    else {
+        try {
+            $diskImg = Mount-DiskImage -ImagePath $RepairIso -PassThru -ErrorAction Stop
+            $vol = $diskImg | Get-Volume -ErrorAction Stop
+            $drive = $vol.DriveLetter + ':'
+            $setup = Join-Path $drive 'setup.exe'
+            if (-not (Test-Path -LiteralPath $setup)) {
+                $setup = Join-Path $drive 'sources\setup.exe'
+            }
+            if (-not (Test-Path -LiteralPath $setup)) {
+                throw 'setup.exe not found on mounted ISO'
+            }
+            Write-Log ('ISO mounted to ' + $drive + ', launching ' + $setup) -Color Green
+            $setupArgs = '/auto upgrade /quiet /eula accept /compat IgnoreWarning /DynamicUpdate disable'
+            $setupProc = Start-Process -FilePath $setup -ArgumentList $setupArgs -Wait -PassThru -ErrorAction Stop
+            $riExit = $setupProc.ExitCode
+            $riDetail = 'exit ' + $riExit
+            Write-Log ('Windows Setup finished with exit code ' + $riExit) -Color Green
+            if ($null -ne $riExit -and $riExit -ne 0) {
+                $hadError = $true
+                Write-Log 'Setup reported a non-zero exit. Check $env:SystemRoot\Panther\setupact.log and setuperr.log for details.' -Color Yellow
+            }
+            else {
+                $restartRecommended = $true
+                Write-Log 'Repair install completed. A reboot is required to finish.' -Color Green
+            }
+        }
+        catch {
+            $hadError = $true
+            $riDetail = 'failed: ' + $_.Exception.Message
+            Write-Log ('Repair install failed: ' + $_.Exception.Message) -Color Yellow
+        }
+        finally {
+            try { Dismount-DiskImage -ImagePath $RepairIso -ErrorAction SilentlyContinue | Out-Null } catch { }
+        }
+    }
+    $riSw.Stop()
+    if (-not $riDetail) { $riDetail = 'skipped' }
+    Add-PhaseResult -Name 'Repair install' -Detail $riDetail -Seconds $riSw.Elapsed.TotalSeconds
+}
+elseif ($RepairIso -and $ReportOnly) {
+    Write-Log 'Repair install skipped (report-only mode). Provide the ISO without -ReportOnly to run it.' -Color Yellow
 }
 
 Write-Log ''

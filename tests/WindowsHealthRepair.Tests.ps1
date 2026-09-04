@@ -45,7 +45,7 @@ Describe 'Script file sanity' {
 
     It 'declares the parameter set' {
         $paramNames = $Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
-        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin', 'CheckDisk', 'LogPath', 'JsonLog')) {
+        foreach ($name in @('ReportOnly', 'Schedule', 'Unschedule', 'ScheduledRun', 'Source', 'EmptyRecycleBin', 'CheckDisk', 'LogPath', 'JsonLog', 'RepairIso')) {
             $paramNames | Should -Contain $name
         }
     }
@@ -72,6 +72,14 @@ Describe 'Script file sanity' {
         $body = $Ast.Extent.Text
         $body | Should -Match '\$JsonLog'
         $body | Should -Match 'JsonLogFile'
+    }
+
+    It 'handles RepairIso for in-place repair install' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '\$RepairIso'
+        $body | Should -Match 'Mount-DiskImage'
+        $body | Should -Match 'setup\.exe'
+        $body | Should -Match 'Repair install'
     }
 
     It 'defines all required functions' {
