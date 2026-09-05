@@ -864,24 +864,28 @@ if ($RepairIso -and -not $ReportOnly) {
     $riSw = [System.Diagnostics.Stopwatch]::StartNew()
     $riDetail = ''
     $riExit = $null
-    if (-not (Test-Path -LiteralPath $RepairIso)) {
+    $repairIsoTrim = $RepairIso.Trim()
+    $wasMounted = $false
+    try { $existingImg = Get-DiskImage -ImagePath $repairIsoTrim -ErrorAction SilentlyContinue; if ($existingImg -and $existingImg.Attached) { $wasMounted = $true } } catch { $wasMounted = $false }
+    if (-not (Test-Path -LiteralPath $repairIsoTrim)) {
         $riDetail = 'skipped (ISO not found)'
         $hadError = $true
         Write-Log ('Repair install ISO not found: ' + $RepairIso) -Color Yellow
     }
-    elseif ($RepairIso -notmatch '(?i)\.iso$') {
+    elseif ($repairIsoTrim -notmatch '(?i)\.iso$') {
         $riDetail = 'skipped (not an ISO)'
         $hadError = $true
         Write-Log ('Repair install source must be a .iso file: ' + $RepairIso) -Color Yellow
     }
     else {
         try {
-            $diskImg = Mount-DiskImage -ImagePath $RepairIso -PassThru -ErrorAction Stop
-            $vol = $diskImg | Get-Volume -ErrorAction Stop
+            $diskImg = Mount-DiskImage -ImagePath $repairIsoTrim -PassThru -ErrorAction Stop
+            $vol = $diskImg | Get-Volume -ErrorAction Stop | Where-Object DriveLetter | Select-Object -First 1
+            if (-not $vol -or -not $vol.DriveLetter) { throw 'No drive letter after mounting ISO' }
             $drive = $vol.DriveLetter + ':'
-            $setup = Join-Path $drive 'setup.exe'
+            $setup = Join-Path ($drive + '\') 'setup.exe'
             if (-not (Test-Path -LiteralPath $setup)) {
-                $setup = Join-Path $drive 'sources\setup.exe'
+                $setup = Join-Path ($drive + '\') 'sources\setup.exe'
             }
             if (-not (Test-Path -LiteralPath $setup)) {
                 throw 'setup.exe not found on mounted ISO'
@@ -907,7 +911,9 @@ if ($RepairIso -and -not $ReportOnly) {
             Write-Log ('Repair install failed: ' + $_.Exception.Message) -Color Yellow
         }
         finally {
-            try { Dismount-DiskImage -ImagePath $RepairIso -ErrorAction SilentlyContinue | Out-Null } catch { }
+            if (-not $wasMounted) {
+                try { Dismount-DiskImage -ImagePath $repairIsoTrim -ErrorAction SilentlyContinue | Out-Null } catch { }
+            }
         }
     }
     $riSw.Stop()
