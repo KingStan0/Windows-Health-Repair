@@ -113,7 +113,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $env:TEMP }
 $LogDir = if ($LogPath) {
-    $p = $LogPath.TrimEnd('\')
+    $p = $LogPath.Trim().TrimEnd('\')
     try {
         $leaf = Split-Path $p -Leaf
         if ($leaf -match '\.(log|jsonl|txt|json)$' -and -not (Test-Path -LiteralPath $p -PathType Container)) { $p = Split-Path $p -Parent }
@@ -333,7 +333,8 @@ function Invoke-NativeTool {
         '"' + $e + '"'
     }) -join ' ')
     $psi.UseShellExecute = $false
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    try { $proc = [System.Diagnostics.Process]::Start($psi) } catch { Write-Log ('Failed to start ' + $FilePath + ': ' + $_.Exception.Message) -Color Yellow; return -1 }
+    if (-not $proc) { return -1 }
     if ($config.UseHighPriority) {
         try { $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High } catch { }
     }
@@ -371,8 +372,9 @@ function Invoke-NativeTool {
             $stallSeconds = 0
         }
     }
-    $exitCode = if ($null -ne $proc.ExitCode) { $proc.ExitCode } else { -1 }
-    return $exitCode
+    $exitCode = $null
+    try { $exitCode = $proc.ExitCode } catch { $exitCode = $null }
+    if ($null -ne $exitCode) { return $exitCode } else { return -1 }
 }
 
 function Add-LogTail {
@@ -526,8 +528,9 @@ function Get-ChkdskExitText {
     return 'Unknown result'
 }
 
-$os = Get-CimInstance -ClassName Win32_OperatingSystem
-$driveName = ($env:SystemDrive -replace ':$', '')
+try { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop } catch { $os = $null }
+$driveName = (($env:SystemDrive | ForEach-Object { $_.Trim() }) -replace ':$', '')
+if (-not $driveName) { $driveName = 'C' }
 $freeBefore = (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue).Free
 $restartRecommended = $false
 $hadError = $false
@@ -865,6 +868,7 @@ if ($RepairIso -and -not $ReportOnly) {
     $riDetail = ''
     $riExit = $null
     $repairIsoTrim = $RepairIso.Trim()
+    try { $repairIsoTrim = [System.IO.Path]::GetFullPath($repairIsoTrim) } catch { }
     $wasMounted = $false
     try { $existingImg = Get-DiskImage -ImagePath $repairIsoTrim -ErrorAction SilentlyContinue; if ($existingImg -and $existingImg.Attached) { $wasMounted = $true } } catch { $wasMounted = $false }
     if (-not (Test-Path -LiteralPath $repairIsoTrim)) {
