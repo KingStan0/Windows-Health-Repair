@@ -47,7 +47,8 @@
 .PARAMETER RepairIso
     Path to Windows 11 ISO for in-place repair install (Fix problems using
     Windows Update equivalent). Runs setup.exe /auto upgrade /quiet after SFC.
-    Requires matching edition/lang/arch and enough free space. Implies reboot.
+    Requires matching edition/lang/arch and about 20 GB free. Asks for a
+    restart at the end (does not reboot on its own).
 
 .EXAMPLE
     .\Repair-WindowsHealthUtility.ps1 -ReportOnly
@@ -99,16 +100,24 @@ function Build-RelaunchArgs {
 
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $elevatedExit = 2
     try {
         $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         if (-not (Test-Path -LiteralPath $psExe)) { $psExe = 'powershell.exe' }
-        Start-Process -FilePath $psExe -Verb RunAs -ArgumentList (Build-RelaunchArgs -BoundParameters $PSBoundParameters -CommandPath $PSCommandPath)
+        [Console]::WriteLine('Requesting administrator privileges (a User Account Control prompt will appear)...')
+        $elevated = Start-Process -FilePath $psExe -Verb RunAs -Wait -PassThru -ArgumentList (Build-RelaunchArgs -BoundParameters $PSBoundParameters -CommandPath $PSCommandPath)
+        $elevatedExit = 0
+        if ($null -ne $elevated) {
+            try { $elevatedExit = $elevated.ExitCode } catch { $elevatedExit = 0 }
+        }
+        if ($null -eq $elevatedExit) { $elevatedExit = 0 }
+        [Console]::WriteLine('The elevated run has finished.')
     }
     catch {
-        [Console]::WriteLine('This script requires Administrator privileges.')
-        exit 1
+        [Console]::WriteLine('This script requires Administrator privileges (the elevation prompt was cancelled or failed): ' + $_.Exception.Message)
+        try { $null = Read-Host 'Press Enter to close' } catch { }
     }
-    exit
+    exit $elevatedExit
 }
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $env:TEMP }
@@ -169,6 +178,9 @@ function Coerce-ConfigValue {
         $trimmed = $LoadedValue.Trim()
         $parsed = 0
         if ([int]::TryParse($trimmed, [ref]$parsed)) { return $parsed }
+    }
+    if ($DefaultValue -is [bool] -and ($LoadedValue -is [int] -or $LoadedValue -is [long] -or $LoadedValue -is [double])) {
+        return [bool]($LoadedValue -ne 0)
     }
     return $LoadedValue
 }
@@ -325,6 +337,7 @@ function Invoke-NativeTool {
         [Parameter(Mandatory)][string]$Phase,
         [int]$StallWarnMinutes = 10
     )
+    if ($StallWarnMinutes -lt 1) { $StallWarnMinutes = 1 }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
     $psi.Arguments = (($ArgumentList | ForEach-Object {
@@ -405,6 +418,10 @@ function Remove-TreeFast {
         Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
         return
     }
+    if ($Path -match '%') {
+        try { [System.IO.Directory]::Delete($Path, $true) } catch { }
+        return
+    }
     $escapedPath = $Path -replace '"', '""'
     & cmd.exe /c ('rmdir /s /q "' + $escapedPath + '"') 2>$null | Out-Null
 }
@@ -439,14 +456,53 @@ function Get-CbsLinesSince {
     return $Lines
 }
 
+function Get-CbsLogOffset {
+    param([string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log")
+    try { return [long](Get-Item -LiteralPath $CbsPath -Force -ErrorAction Stop).Length }
+    catch { return [long]0 }
+}
+
+function Read-CbsLinesFrom {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [long]$Offset = 0
+    )
+    $fs = New-Object -TypeName System.IO.FileStream -ArgumentList @($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        if ($Offset -lt 0 -or $Offset -gt $fs.Length) { $Offset = 0 }
+        if ($Offset -gt 0) { [void]$fs.Seek($Offset, [System.IO.SeekOrigin]::Begin) }
+        $sr = New-Object -TypeName System.IO.StreamReader -ArgumentList @($fs, [System.Text.Encoding]::UTF8, $true)
+        try { $text = $sr.ReadToEnd() }
+        finally { $sr.Dispose() }
+    }
+    finally {
+        if ($fs) { $fs.Dispose() }
+    }
+    if ([string]::IsNullOrEmpty($text)) { return @() }
+    return @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+}
+
 function Get-SfcCbsResult {
     param(
         [datetime]$Since = [datetime]::MinValue,
-        [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
+        [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log",
+        [long]$Offset = -1
     )
-    $result = @{ RepairingTotal = 0; RepairedFiles = 0 }
-    if (-not (Test-Path -LiteralPath $CbsPath)) { return $result }
-    $lines = @(Get-Content -LiteralPath $CbsPath -Tail 5000)
+    $result = @{ RepairingTotal = 0; RepairedFiles = 0; Available = $true }
+    if (-not (Test-Path -LiteralPath $CbsPath)) {
+        $result.Available = $false
+        return $result
+    }
+    if ($Offset -ge 0) {
+        try { $lines = @(Read-CbsLinesFrom -Path $CbsPath -Offset $Offset) }
+        catch {
+            $result.Available = $false
+            return $result
+        }
+    }
+    else {
+        $lines = @(Get-Content -LiteralPath $CbsPath -Tail 5000)
+    }
     $lines = Get-CbsLinesSince -Lines $lines -Since $Since
     $repairing = $lines | Select-String -Pattern '\[SR\] Repairing (\d+) components' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value }
     if ($repairing) { $result.RepairingTotal = ($repairing | Measure-Object -Sum).Sum }
@@ -460,10 +516,15 @@ function Get-DismLocalSource {
         if (Test-Path -LiteralPath $ManualSource) {
             $item = Get-Item -LiteralPath $ManualSource
             if ($item.PSIsContainer) {
-                $wim = Join-Path $ManualSource 'sources\install.wim'
-                if (Test-Path -LiteralPath $wim) { return $wim }
-                $esd = Join-Path $ManualSource 'sources\install.esd'
-                if (Test-Path -LiteralPath $esd) { return $esd }
+                $candidates = @(
+                    (Join-Path $ManualSource 'sources\install.wim'),
+                    (Join-Path $ManualSource 'sources\install.esd'),
+                    (Join-Path $ManualSource 'install.wim'),
+                    (Join-Path $ManualSource 'install.esd')
+                )
+                foreach ($candidate in $candidates) {
+                    if (Test-Path -LiteralPath $candidate) { return $candidate }
+                }
                 return ''
             }
             if ($item.Extension -match '(?i)^\.(wim|esd)$') { return $ManualSource }
@@ -471,13 +532,37 @@ function Get-DismLocalSource {
         }
         return ''
     }
-    foreach ($drive in (Get-PSDrive -PSProvider FileSystem | Where-Object { -not [string]::IsNullOrEmpty($_.Root) })) {
+    $drives = @(Get-PSDrive -PSProvider FileSystem | Where-Object { -not [string]::IsNullOrEmpty($_.Root) })
+    foreach ($drive in $drives) {
         $wim = Join-Path $drive.Root 'sources\install.wim'
         if (Test-Path -LiteralPath $wim) { return $wim }
+    }
+    foreach ($drive in $drives) {
         $esd = Join-Path $drive.Root 'sources\install.esd'
         if (Test-Path -LiteralPath $esd) { return $esd }
     }
     return ''
+}
+
+function Get-DismSourceIndex {
+    param([string]$SourcePath)
+    if (-not $SourcePath) { return 0 }
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return 0 }
+    try {
+        $images = @(Get-WindowsImage -ImagePath $SourcePath -ErrorAction Stop)
+        if ($images.Count -le 1) { return 0 }
+        $editionId = ''
+        try {
+            $editionId = [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name EditionID -ErrorAction SilentlyContinue).EditionID
+        }
+        catch { $editionId = '' }
+        if ($editionId) {
+            $match = @($images | Where-Object { $_.ImageName -like ('*' + $editionId + '*') } | Select-Object -First 1)
+            if ($match.Count -gt 0) { return [int]$match[0].ImageIndex }
+        }
+        return 0
+    }
+    catch { return 0 }
 }
 
 function Get-PendingReboot {
@@ -506,10 +591,17 @@ function Get-PendingReboot {
 function Get-UnrepairableSfcFiles {
     param(
         [datetime]$Since = [datetime]::MinValue,
-        [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log"
+        [string]$CbsPath = "$env:SystemRoot\Logs\CBS\CBS.log",
+        [long]$Offset = -1
     )
     if (-not (Test-Path -LiteralPath $CbsPath)) { return @() }
-    $lines = @(Get-Content -LiteralPath $CbsPath -Tail 5000)
+    if ($Offset -ge 0) {
+        try { $lines = @(Read-CbsLinesFrom -Path $CbsPath -Offset $Offset) }
+        catch { return @() }
+    }
+    else {
+        $lines = @(Get-Content -LiteralPath $CbsPath -Tail 5000)
+    }
     $lines = Get-CbsLinesSince -Lines $lines -Since $Since
     $names = @($lines |
         Select-String -Pattern '\[SR\] Cannot repair member file.*?"([^"]+)"' |
@@ -533,6 +625,8 @@ $driveName = (($env:SystemDrive | ForEach-Object { $_.Trim() }) -replace ':$', '
 if (-not $driveName) { $driveName = 'C' }
 $freeBefore = (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue).Free
 $restartRecommended = $false
+$pendingRebootAtStart = $false
+$repairInstallPending = $false
 $hadError = $false
 $sfcResultText = 'See log'
 $totalRunStart = Get-Date
@@ -592,7 +686,7 @@ catch { }
 try {
     $pending = Get-PendingReboot
     $pendingText = 'No'
-    if ($pending) { $pendingText = 'Yes'; $restartRecommended = $true }
+    if ($pending) { $pendingText = 'Yes'; $pendingRebootAtStart = $true }
     Write-Log ('  Pending reboot : ' + $pendingText)
 }
 catch { }
@@ -673,6 +767,18 @@ if ($config.RunDismRestore -and -not $ReportOnly) {
     Write-Log 'This is the longest step: 10-30 minutes. It may pause at the same percentage while downloading repair files - that is normal. Do not close this window.'
     $repairSw = [System.Diagnostics.Stopwatch]::StartNew()
     $localSource = Get-DismLocalSource -ManualSource $Source
+    $sourceArgs = @()
+    if ($localSource) {
+        $sourceArgs = @('/Source:' + $localSource)
+        $sourceIndex = Get-DismSourceIndex -SourcePath $localSource
+        if ($sourceIndex -gt 0) {
+            $sourceArgs += ('/Index:' + $sourceIndex)
+            Write-Log ('Local source image index selected: ' + $sourceIndex)
+        }
+        if ($localSource -match '(?i)\.esd$') {
+            Write-Log 'Note: some systems cannot use an .esd file directly as a DISM repair source. If RestoreHealth fails below, export it to a .wim first: dism /Export-Image /SourceImageFile:"<install.esd>" /SourceIndex:1 /DestinationImageFile:"<install.wim>" /Compress:max' -Color Yellow
+        }
+    }
     $dismRepairExit = $null
     $restoreDetail = ''
     if ($config.SafeRestoreOnly) {
@@ -684,7 +790,7 @@ if ($config.RunDismRestore -and -not $ReportOnly) {
         }
         else {
             Write-Log ('SafeRestoreOnly is enabled: restoring from local source only (no Windows Update): ' + $localSource) -Color Yellow
-            $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth', ('/Source:' + $localSource), '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
+            $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList (@('/Online', '/Cleanup-Image', '/RestoreHealth') + $sourceArgs + '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
         }
     }
     else {
@@ -693,7 +799,7 @@ if ($config.RunDismRestore -and -not $ReportOnly) {
         if ($null -ne $dismRepairExit -and $dismRepairExit -ne 0) {
             if ($localSource) {
                 Write-Log ('Windows Update source failed; retrying with local source: ' + $localSource) -Color Yellow
-                $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth', ('/Source:' + $localSource), '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
+                $dismRepairExit = Invoke-NativeTool -FilePath 'dism.exe' -ArgumentList (@('/Online', '/Cleanup-Image', '/RestoreHealth') + $sourceArgs + '/LimitAccess') -Phase 'DISM RestoreHealth (local source)' -StallWarnMinutes $config.StallWarnMinutes
             }
         }
     }
@@ -740,18 +846,22 @@ if ($config.RunSfc) {
         Write-Log 'Running sfc /scannow - verifies and repairs protected system files.' -Color Green
         Write-Log 'Usually takes 10-20 minutes. It prints its own verification progress below. Do not close this window.'
     }
+    $cbsOffsetStart = Get-CbsLogOffset
     $sfcSw = [System.Diagnostics.Stopwatch]::StartNew()
     $sfcExit = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList $sfcArgs -Phase 'SFC' -StallWarnMinutes $config.SfcStallWarnMinutes
     Write-Log ('SFC finished with exit code ' + $sfcExit)
 
-    $cbsResult = Get-SfcCbsResult -Since $totalRunStart
-    $repairingAfterFirst = $cbsResult.RepairingTotal
-    $repairedAfterFirst = $cbsResult.RepairedFiles
-    if ($cbsResult.RepairingTotal -eq 0 -and $cbsResult.RepairedFiles -eq 0) {
+    $cbsResult = Get-SfcCbsResult -Since $totalRunStart -Offset $cbsOffsetStart
+    if (-not $cbsResult.Available) {
+        $sfcResultText = 'Undetermined'
+        Write-Log 'SFC result: could not read CBS.log - unable to verify the outcome. Details below.' -Color Yellow
+        Add-LogTail -Path "$env:SystemRoot\Logs\CBS\CBS.log" -Label 'CBS log'
+    }
+    elseif ($cbsResult.RepairingTotal -eq 0 -and $cbsResult.RepairedFiles -eq 0) {
         $sfcResultText = 'Healthy'
         Write-Log 'SFC result: verified via CBS.log - no components needed repair. System files are healthy.' -Color Green
     }
-    elseif ($cbsResult.RepairingTotal -gt 0 -or $cbsResult.RepairedFiles -gt 0) {
+    else {
         if ($ReportOnly) {
             $hadError = $true
             $sfcResultText = 'Violations found'
@@ -763,11 +873,6 @@ if ($config.RunSfc) {
             Write-Log 'SFC result: verified via CBS.log - repairs were applied. A restart is recommended.' -Color Green
         }
     }
-    else {
-        $sfcResultText = 'Undetermined'
-        Write-Log 'SFC result: could not be determined from CBS.log. Details below.' -Color Yellow
-        Add-LogTail -Path "$env:SystemRoot\Logs\CBS\CBS.log" -Label 'CBS log'
-    }
     if ($ReportOnly -and $sfcExit -eq 1 -and $sfcResultText -eq 'Undetermined') {
         $hadError = $true
         $sfcResultText = 'Violations found'
@@ -775,13 +880,15 @@ if ($config.RunSfc) {
     }
     if (-not $ReportOnly -and $sfcResultText -eq 'Repaired') {
         Write-Log 'SFC reported repairs on the first pass. Running a second pass to catch dependent files the first pass may have missed...' -Color Yellow
+        $cbsOffsetPass2 = Get-CbsLogOffset
         $sfcExit2 = Invoke-NativeTool -FilePath 'sfc.exe' -ArgumentList '/scannow' -Phase 'SFC (second pass)' -StallWarnMinutes $config.SfcStallWarnMinutes
         Write-Log ('SFC second pass finished with exit code ' + $sfcExit2)
         if ($null -ne $sfcExit2 -and $sfcExit2 -ne 0) { $sfcExit = $sfcExit2 }
-        $cbsResult2 = Get-SfcCbsResult -Since $totalRunStart
-        $newRepairing = [Math]::Max(0, $cbsResult2.RepairingTotal - $repairingAfterFirst)
-        $newRepaired = [Math]::Max(0, $cbsResult2.RepairedFiles - $repairedAfterFirst)
-        if ($newRepairing -eq 0 -and $newRepaired -eq 0) {
+        $cbsResult2 = Get-SfcCbsResult -Since $totalRunStart -Offset $cbsOffsetPass2
+        if (-not $cbsResult2.Available) {
+            Write-Log 'SFC second pass: could not read CBS.log - keeping the first-pass result.' -Color Yellow
+        }
+        elseif ($cbsResult2.RepairingTotal -eq 0 -and $cbsResult2.RepairedFiles -eq 0) {
             $sfcResultText = 'Healthy'
             $sfcExit = $sfcExit2
             Write-Log 'SFC second pass: no components needed repair. System files are now healthy.' -Color Green
@@ -799,7 +906,7 @@ if ($config.RunSfc) {
     elseif ($sfcExit -eq 3) {
         $hadError = $true
         Write-Log 'SFC result: could not repair some files (exit 3). Restart, then run this script again.' -Color Yellow
-        $unrep = Get-UnrepairableSfcFiles -Since $totalRunStart
+        $unrep = Get-UnrepairableSfcFiles -Since $totalRunStart -Offset $cbsOffsetStart
         if ($unrep.Count -gt 0) {
             Write-Log 'Files that could not be repaired:' -Color Yellow
             foreach ($f in $unrep) { Write-Log ('  - ' + $f) }
@@ -862,8 +969,8 @@ if ($RepairIso -and -not $ReportOnly) {
     Write-Log '====================================================================' -Color Cyan
     Write-Log 'PHASE 2b: In-place repair install (Fix problems using Windows Update)' -Color Cyan
     Write-Log '====================================================================' -Color Cyan
-    Write-Log 'This is the Fix problems using Windows Update equivalent: reinstalls Windows while keeping apps, files, and settings. Requires matching edition/lang/arch and 5+ GB free.' -Color Green
-    Write-Log 'Mounting ISO and launching Windows Setup with /auto upgrade /quiet /eula accept. This can take 30-60 minutes and will reboot automatically.' -Color Green
+    Write-Log 'This is the Fix problems using Windows Update equivalent: reinstalls Windows while keeping apps, files, and settings. Requires matching edition/lang/arch and about 20 GB free.' -Color Green
+    Write-Log 'Mounting ISO and launching Windows Setup with /auto upgrade /quiet /eula accept. This can take 30-60 minutes and needs a restart at the end - the tool will offer it.' -Color Green
     $riSw = [System.Diagnostics.Stopwatch]::StartNew()
     $riDetail = ''
     $riExit = $null
@@ -871,7 +978,14 @@ if ($RepairIso -and -not $ReportOnly) {
     try { $repairIsoTrim = [System.IO.Path]::GetFullPath($repairIsoTrim) } catch { }
     $wasMounted = $false
     try { $existingImg = Get-DiskImage -ImagePath $repairIsoTrim -ErrorAction SilentlyContinue; if ($existingImg -and $existingImg.Attached) { $wasMounted = $true } } catch { $wasMounted = $false }
-    if (-not (Test-Path -LiteralPath $repairIsoTrim)) {
+    $riFreeGb = -1
+    try { $riFreeGb = [Math]::Floor((Get-PSDrive -Name $driveName -ErrorAction Stop).Free / 1GB) } catch { $riFreeGb = -1 }
+    if ($riFreeGb -ge 0 -and $riFreeGb -lt 20) {
+        $riDetail = 'skipped (only ' + $riFreeGb + ' GB free, about 20 GB required)'
+        $hadError = $true
+        Write-Log ('Repair install skipped: only ' + $riFreeGb + ' GB free on ' + $driveName + ': - Windows Setup needs about 20 GB of free space.') -Color Yellow
+    }
+    elseif (-not (Test-Path -LiteralPath $repairIsoTrim)) {
         $riDetail = 'skipped (ISO not found)'
         $hadError = $true
         Write-Log ('Repair install ISO not found: ' + $RepairIso) -Color Yellow
@@ -882,6 +996,7 @@ if ($RepairIso -and -not $ReportOnly) {
         Write-Log ('Repair install source must be a .iso file: ' + $RepairIso) -Color Yellow
     }
     else {
+        $setupSucceeded = $false
         try {
             $diskImg = Mount-DiskImage -ImagePath $repairIsoTrim -PassThru -ErrorAction Stop
             $vol = $diskImg | Get-Volume -ErrorAction Stop | Where-Object DriveLetter | Select-Object -First 1
@@ -894,8 +1009,13 @@ if ($RepairIso -and -not $ReportOnly) {
             if (-not (Test-Path -LiteralPath $setup)) {
                 throw 'setup.exe not found on mounted ISO'
             }
+            $mediaWim = Join-Path ($drive + '\') 'sources\install.wim'
+            $mediaEsd = Join-Path ($drive + '\') 'sources\install.esd'
+            if (-not (Test-Path -LiteralPath $mediaWim) -and -not (Test-Path -LiteralPath $mediaEsd)) {
+                throw 'ISO does not look like Windows installation media (no sources\install.wim/install.esd)'
+            }
             Write-Log ('ISO mounted to ' + $drive + ', launching ' + $setup) -Color Green
-            $setupArgs = '/auto upgrade /quiet /eula accept /compat IgnoreWarning /DynamicUpdate disable'
+            $setupArgs = '/auto upgrade /quiet /eula accept /compat IgnoreWarning /DynamicUpdate disable /noreboot'
             $setupProc = Start-Process -FilePath $setup -ArgumentList $setupArgs -Wait -PassThru -ErrorAction Stop
             $riExit = $setupProc.ExitCode
             $riDetail = 'exit ' + $riExit
@@ -905,8 +1025,10 @@ if ($RepairIso -and -not $ReportOnly) {
                 Write-Log 'Setup reported a non-zero exit. Check $env:SystemRoot\Panther\setupact.log and setuperr.log for details.' -Color Yellow
             }
             else {
+                $setupSucceeded = $true
+                $repairInstallPending = $true
                 $restartRecommended = $true
-                Write-Log 'Repair install completed. A reboot is required to finish.' -Color Green
+                Write-Log 'Repair install staged successfully. A restart is needed to finish it.' -Color Green
             }
         }
         catch {
@@ -915,7 +1037,13 @@ if ($RepairIso -and -not $ReportOnly) {
             Write-Log ('Repair install failed: ' + $_.Exception.Message) -Color Yellow
         }
         finally {
-            if (-not $wasMounted) {
+            if ($wasMounted) {
+                Write-Log 'ISO was already mounted before this run - left mounted.'
+            }
+            elseif ($setupSucceeded) {
+                Write-Log 'ISO left mounted because Windows Setup still needs it - it can be dismounted after the restart.'
+            }
+            else {
                 try { Dismount-DiskImage -ImagePath $repairIsoTrim -ErrorAction SilentlyContinue | Out-Null } catch { }
             }
         }
@@ -933,7 +1061,7 @@ Write-Log '===================================================================='
 Write-Log 'PHASE 3: Disk cleanup' -Color Cyan
 Write-Log '====================================================================' -Color Cyan
 
-if ($config.RunComponentCleanup -and -not $ReportOnly) {
+if ($config.RunComponentCleanup -and -not $ReportOnly -and -not $repairInstallPending) {
     Show-Progress 'Component cleanup'
     Write-Log 'Analyzing the component store (AnalyzeComponentStore) to report reclaimable space - usually under a minute.' -Color Green
     $analyzeSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -954,8 +1082,12 @@ else {
     if ($ReportOnly) {
         Write-Log 'Component cleanup skipped (report-only mode).' -Color Yellow
     }
-    else {
+    elseif (-not $config.RunComponentCleanup) {
         Write-Log 'Component cleanup skipped (config: RunComponentCleanup = false).' -Color Yellow
+    }
+    else {
+        $script:totalSteps--
+        Write-Log 'Component cleanup skipped: a repair install is staged and its rollback data must survive until the restart. Run this tool again after the restart to clean up the component store.' -Color Yellow
     }
 }
 
@@ -966,17 +1098,19 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
     $wuServices = @('wuauserv', 'dosvc', 'bits')
     $stopped = @()
     $alreadyStopped = @()
+    $notPresent = @()
     $wasRunning = @{}
     foreach ($svc in $wuServices) {
         $svcObj = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if ($null -eq $svcObj) {
-            $wasRunning[$svc] = $false
-            Write-Log ('Service ' + $svc + ' not present on this system.')
+            $notPresent += $svc
+            Write-Log ('Service ' + $svc + ' not present on this system - skipping it.')
             continue
         }
         $wasRunning[$svc] = ($svcObj.Status -eq 'Running')
     }
     foreach ($svc in $wuServices) {
+        if ($notPresent -contains $svc) { continue }
         if (-not $wasRunning[$svc]) {
             $alreadyStopped += $svc
             Write-Log ('Service ' + $svc + ' was already stopped - leaving it as-is.')
@@ -992,7 +1126,7 @@ if ($config.RunWindowsUpdateCache -and -not $ReportOnly) {
         }
     }
     $wuFreed = 0
-    if ($stopped.Count + $alreadyStopped.Count -eq $wuServices.Count) {
+    if ($stopped.Count + $alreadyStopped.Count + $notPresent.Count -eq $wuServices.Count) {
         $wuCache = "$env:SystemRoot\SoftwareDistribution\Download"
         $wuSize = Get-DirSizeBytes -Path $wuCache
         Remove-TreeFast -Path $wuCache
@@ -1148,16 +1282,31 @@ if ($hadError) {
     Write-Log 'One or more phases reported errors. See the log for details.' -Color Yellow
 }
 
-if ($restartRecommended -and -not $ScheduledRun) {
+$restartNeeded = ($restartRecommended -or $pendingRebootAtStart)
+
+if ($restartNeeded -and -not $ScheduledRun) {
     Write-Log ''
-    Write-Log 'A restart is recommended to finish applying repairs.' -Color Yellow
+    if ($repairInstallPending) {
+        Write-Log 'A restart is required to finish the repair install.' -Color Yellow
+    }
+    elseif ($restartRecommended) {
+        Write-Log 'A restart is recommended to finish applying repairs.' -Color Yellow
+    }
+    else {
+        Write-Log 'A restart was already pending before this run. Restart to finish those changes.' -Color Yellow
+    }
     $answer = Read-Host 'Restart the computer now? (Y/N)'
     if ($answer -match '^[Yy]') {
         Restart-Computer -Force
     }
 }
-elseif ($restartRecommended -and $ScheduledRun) {
-    Write-Log 'A restart is recommended to finish applying repairs (skipped prompt in scheduled mode).'
+elseif ($restartNeeded -and $ScheduledRun) {
+    if ($repairInstallPending) {
+        Write-Log 'A restart is required to finish the repair install (skipped prompt in scheduled mode).'
+    }
+    else {
+        Write-Log 'A restart is recommended to finish applying repairs (skipped prompt in scheduled mode).'
+    }
 }
 
 if ($config.ShowCompletionPopup -and -not $ScheduledRun) {
@@ -1166,7 +1315,9 @@ if ($config.ShowCompletionPopup -and -not $ScheduledRun) {
     $popupText = 'Windows Health Repair Utility has completed.' + [Environment]::NewLine
     $popupText += 'Full log: ' + $LogFile + [Environment]::NewLine
     if ($hadError) { $popupText += [Environment]::NewLine + 'Some phases reported errors - see the log for details.' }
+    elseif ($repairInstallPending) { $popupText += [Environment]::NewLine + 'Restart the PC to finish the repair install.' }
     elseif ($restartRecommended) { $popupText += [Environment]::NewLine + 'A restart is recommended to finish applying repairs.' }
+    elseif ($pendingRebootAtStart) { $popupText += [Environment]::NewLine + 'A restart was already pending. Restart when convenient.' }
     try {
         (New-Object -ComObject WScript.Shell).Popup($popupText, 0, $popupTitle, 64) | Out-Null
     }
@@ -1180,7 +1331,7 @@ if ($Host.Name -eq 'ConsoleHost' -and -not $ScheduledRun) {
 if ($hadError) {
     exit 2
 }
-if ($restartRecommended) {
+if ($restartNeeded) {
     exit 1
 }
 exit 0

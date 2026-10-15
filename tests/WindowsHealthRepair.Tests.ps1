@@ -15,7 +15,10 @@ BeforeAll {
 
     . ([scriptblock]::Create((Get-DefinedFunction 'Format-Duration').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-DismLocalSource').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Get-DismSourceIndex').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-CbsLinesSince').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Read-CbsLinesFrom').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Get-CbsLogOffset').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-SfcCbsResult').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Build-RelaunchArgs').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Coerce-ConfigValue').Extent.Text))
@@ -23,6 +26,7 @@ BeforeAll {
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-UnrepairableSfcFiles').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Get-PendingReboot').Extent.Text))
     . ([scriptblock]::Create((Get-DefinedFunction 'Test-ProtectedPath').Extent.Text))
+    . ([scriptblock]::Create((Get-DefinedFunction 'Remove-TreeFast').Extent.Text))
 }
 
 Describe 'Script file sanity' {
@@ -83,7 +87,7 @@ Describe 'Script file sanity' {
     }
 
     It 'defines all required functions' {
-        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-CbsLinesSince', 'Get-DismLocalSource', 'Get-DirSizeBytes', 'Add-LogTail', 'Build-RelaunchArgs', 'Coerce-ConfigValue', 'Get-ChkdskExitText', 'Get-UnrepairableSfcFiles', 'Get-PendingReboot')) {
+        foreach ($name in @('Write-Log', 'Show-Progress', 'Add-PhaseResult', 'Format-Duration', 'Invoke-NativeTool', 'Get-SfcCbsResult', 'Get-CbsLinesSince', 'Read-CbsLinesFrom', 'Get-CbsLogOffset', 'Get-DismLocalSource', 'Get-DismSourceIndex', 'Get-DirSizeBytes', 'Add-LogTail', 'Build-RelaunchArgs', 'Coerce-ConfigValue', 'Get-ChkdskExitText', 'Get-UnrepairableSfcFiles', 'Get-PendingReboot')) {
             Get-DefinedFunction $name | Should -Not -BeNullOrEmpty
         }
     }
@@ -190,6 +194,63 @@ Describe 'Script file sanity' {
         $body | Should -Match 'PackagesPending'
         $body | Should -Match 'PendingFileRenameOperations'
     }
+
+    It 'waits for the elevated instance and propagates its exit code' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'Start-Process -FilePath \$psExe -Verb RunAs -Wait -PassThru'
+        $body | Should -Match 'exit \$elevatedExit'
+    }
+
+    It 'takes a CBS.log byte offset before SFC and reads verdicts from that offset' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '\$cbsOffsetStart = Get-CbsLogOffset'
+        $body | Should -Match 'Get-SfcCbsResult -Since \$totalRunStart -Offset \$cbsOffsetStart'
+        $body | Should -Match 'Get-UnrepairableSfcFiles -Since \$totalRunStart -Offset \$cbsOffsetStart'
+    }
+
+    It 'reads the SFC second-pass verdict from an offset taken before the second pass' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '\$cbsOffsetPass2 = Get-CbsLogOffset'
+        $body | Should -Match 'Get-SfcCbsResult -Since \$totalRunStart -Offset \$cbsOffsetPass2'
+    }
+
+    It 'repair install uses /noreboot and leaves the ISO mounted on success' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '/noreboot'
+        $body | Should -Match 'repairInstallPending'
+        $body | Should -Match 'ISO left mounted'
+    }
+
+    It 'skips component-store cleanup while a repair install is staged' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'RunComponentCleanup -and -not \$ReportOnly -and -not \$repairInstallPending'
+        $body | Should -Match 'rollback data must survive'
+    }
+
+    It 'checks repair install free space and installation media' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'about 20 GB'
+        $body | Should -Match 'install\.wim/install\.esd'
+    }
+
+    It 'tracks missing WU services separately from stopped ones' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match '\$notPresent \+= \$svc'
+        $body | Should -Match 'stopped\.Count \+ \$alreadyStopped\.Count \+ \$notPresent\.Count'
+    }
+
+    It 'registers every progress label in the step plan' {
+        $body = $Ast.Extent.Text
+        $labels = [regex]::Matches($body, "Show-Progress '([^']+)'") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+        $adds = [regex]::Matches($body, '\[void\]\$steps\.Add\(''([^'']+)''\)') | ForEach-Object { $_.Groups[1].Value }
+        foreach ($label in $labels) { $adds | Should -Contain $label }
+    }
+
+    It 'always starts elevated runs with a visible launcher message' {
+        $body = $Ast.Extent.Text
+        $body | Should -Match 'Requesting administrator privileges'
+        $body | Should -Match 'The elevated run has finished'
+    }
 }
 
 Describe 'Build-RelaunchArgs' {
@@ -249,6 +310,13 @@ Describe 'Coerce-ConfigValue' {
         Coerce-ConfigValue -DefaultValue 10 -LoadedValue '10' | Should -Be 10
         Coerce-ConfigValue -DefaultValue 10 -LoadedValue 'notanint' | Should -Be 'notanint'
     }
+
+    It 'converts numeric 1/0 to booleans' {
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue 0 | Should -Be $false
+        Coerce-ConfigValue -DefaultValue $true -LoadedValue 1 | Should -Be $true
+        Coerce-ConfigValue -DefaultValue $false -LoadedValue 1.0 | Should -Be $true
+        Coerce-ConfigValue -DefaultValue $false -LoadedValue 0.0 | Should -Be $false
+    }
 }
 
 Describe 'Get-SfcCbsResult' {
@@ -279,6 +347,53 @@ Describe 'Get-SfcCbsResult' {
         Set-Content -LiteralPath $CbsNoTs -Value @('no timestamp line [SR] Repairing 7 components') -Encoding UTF8
         $r = Get-SfcCbsResult -Since $cutoff -CbsPath $CbsNoTs
         $r.RepairingTotal | Should -Be 7
+    }
+
+    It 'counts only entries after a byte offset, even when older entries fall outside any tail window' {
+        $big = Join-Path $TestDrive 'CBS_big.log'
+        $filler = 1..6000 | ForEach-Object { 'filler line {0}' -f $_ }
+        Set-Content -LiteralPath $big -Value (@('2026-08-14 10:00:00, Info [SR] Repairing 7 components') + $filler) -Encoding UTF8
+        $offset = (Get-Item -LiteralPath $big).Length
+        Add-Content -LiteralPath $big -Value '2026-08-14 13:00:00, Info [SR] Repairing 2 components' -Encoding UTF8
+        Add-Content -LiteralPath $big -Value '2026-08-14 13:00:05, Info [SR] Repaired 1 files' -Encoding UTF8
+        $r = Get-SfcCbsResult -Offset $offset -CbsPath $big
+        $r.Available | Should -Be $true
+        $r.RepairingTotal | Should -Be 2
+        $r.RepairedFiles | Should -Be 1
+    }
+
+    It 'reports the log as unavailable when it cannot be read' {
+        $r = Get-SfcCbsResult -Offset 0 -CbsPath (Join-Path $TestDrive 'CBS_missing.log')
+        $r.Available | Should -Be $false
+        $r.RepairingTotal | Should -Be 0
+    }
+}
+
+Describe 'Read-CbsLinesFrom' {
+    It 'reads only lines written after the saved byte offset' {
+        $f = Join-Path $TestDrive 'CBS_offset.log'
+        Set-Content -LiteralPath $f -Value '2026-08-14 11:00:00, Info [SR] Repairing 9 components' -Encoding UTF8
+        $offset = (Get-Item -LiteralPath $f).Length
+        Add-Content -LiteralPath $f -Value '2026-08-14 13:00:00, Info [SR] Repairing 5 components' -Encoding UTF8
+        Add-Content -LiteralPath $f -Value '2026-08-14 13:00:05, Info [SR] Repaired 1 files' -Encoding UTF8
+        $lines = @(Read-CbsLinesFrom -Path $f -Offset $offset)
+        $lines.Count | Should -Be 2
+        ($lines -join ' ') | Should -Match 'Repairing 5'
+        ($lines -join ' ') | Should -Not -Match 'Repairing 9'
+    }
+
+    It 'falls back to the start of the file when the offset is past the end' {
+        $f = Join-Path $TestDrive 'CBS_short.log'
+        Set-Content -LiteralPath $f -Value '2026-08-14 13:00:00, Info [SR] Repairing 2 components' -Encoding UTF8
+        $lines = @(Read-CbsLinesFrom -Path $f -Offset 999999)
+        $lines.Count | Should -Be 1
+    }
+
+    It 'returns nothing for a file with no content after the offset' {
+        $f = Join-Path $TestDrive 'CBS_eof.log'
+        Set-Content -LiteralPath $f -Value 'only line [SR] Repairing 1 components' -Encoding UTF8
+        $lines = @(Read-CbsLinesFrom -Path $f -Offset (Get-CbsLogOffset -CbsPath $f))
+        $lines.Count | Should -Be 0
     }
 }
 
@@ -333,8 +448,14 @@ Describe 'Get-DismLocalSource' {
         Get-DismLocalSource -ManualSource (Join-Path $fake 'nope') | Should -Be ''
     }
 
+    It 'returns the wim path for a folder that directly contains the image (e.g. a sources folder)' {
+        Get-DismLocalSource -ManualSource (Join-Path $fake 'sources') | Should -Be (Join-Path $fake 'sources\install.wim')
+    }
+
     It 'returns empty for a folder without an install image' {
-        Get-DismLocalSource -ManualSource (Join-Path $fake 'sources') | Should -Be ''
+        $empty = Join-Path $TestDrive 'empty-folder'
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        Get-DismLocalSource -ManualSource $empty | Should -Be ''
     }
 
     It 'returns empty when no manual source is given' {
@@ -345,6 +466,44 @@ Describe 'Get-DismLocalSource' {
         $bad = Join-Path $TestDrive 'bad.txt'
         Set-Content -LiteralPath $bad -Value 'dummy' -Encoding UTF8
         Get-DismLocalSource -ManualSource $bad | Should -Be ''
+    }
+}
+
+Describe 'Get-DismSourceIndex' {
+    It 'returns 0 for a directory path' {
+        Get-DismSourceIndex -SourcePath $TestDrive | Should -Be 0
+    }
+
+    It 'returns 0 for an unreadable image file' {
+        $fakeWim = Join-Path $TestDrive 'fake.wim'
+        Set-Content -LiteralPath $fakeWim -Value 'not a real wim' -Encoding UTF8
+        Get-DismSourceIndex -SourcePath $fakeWim | Should -Be 0
+    }
+
+    It 'returns 0 for an empty path' {
+        Get-DismSourceIndex -SourcePath '' | Should -Be 0
+    }
+}
+
+Describe 'Remove-TreeFast' {
+    It 'removes a directory tree whose name contains percent signs' {
+        $target = Join-Path $TestDrive 'pct%TEMP%safe'
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $target 'file.txt') -Value 'x' -Encoding UTF8
+        Remove-TreeFast -Path $target
+        Test-Path -LiteralPath $target | Should -Be $false
+    }
+
+    It 'removes a normal directory tree with nested content' {
+        $target = Join-Path $TestDrive 'plain-tree'
+        New-Item -ItemType Directory -Path (Join-Path $target 'sub') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $target 'sub\file.txt') -Value 'x' -Encoding UTF8
+        Remove-TreeFast -Path $target
+        Test-Path -LiteralPath $target | Should -Be $false
+    }
+
+    It 'does nothing for a missing path' {
+        { Remove-TreeFast -Path (Join-Path $TestDrive 'does-not-exist') } | Should -Not -Throw
     }
 }
 
@@ -433,5 +592,11 @@ Describe 'Launcher batch file' {
     It 'uses single quotes for Unblock-File (CMD-safe with spaces)' {
         $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health Utility.bat') -Raw
         $bat | Should -Match "Unblock-File -LiteralPath '.*'"
+    }
+
+    It 'propagates the script exit code to the caller' {
+        $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Repair Windows Health Utility.bat') -Raw
+        $bat | Should -Match 'WHU_EXIT=%errorlevel%'
+        $bat | Should -Match 'exit /b %WHU_EXIT%'
     }
 }
